@@ -88,7 +88,7 @@ async def session_action(session):
     openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     messages = [
-        {"role": "user", "content": "list commits for Charles-AcornBids YC_Agent_Jam_Example repository and list all files changed and their contents. List the contents in markdown format, not just a link to the file."}
+        {"role": "user", "content": "View the most recent open pull request for Charles-AcornBids YC_Agent_Jam_Example repository and add a comment saying 'hey there from MergeTune'."}
     ]
 
     for i in range(10):

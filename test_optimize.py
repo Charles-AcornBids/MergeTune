@@ -261,7 +261,8 @@ def run_function_optimization(func, kwargs, number, repeat):
 
     # Generate optimized code
     print("\n[GENERATING OPTIMIZED CODE...]")
-    optimized_source = optimize(slow_source)
+    result = optimize(slow_source, benchmark=False)  # Don't auto-benchmark Python code
+    optimized_source = result['optimized']
 
     print("\n[OPTIMIZED CODE]")
     print("-" * 80)
@@ -320,81 +321,60 @@ def run_regex_optimization(slow_pattern):
     print("\n[ORIGINAL PATTERN]")
     print(f"Pattern: {slow_pattern}")
 
-    # Generate test cases: 25 positive, 25 negative
-    print("\n[GENERATING TEST CASES...]")
-    positive_cases, negative_cases = generate_regex_test_cases(slow_pattern, num_positive=25, num_negative=25)
-    test_data = positive_cases + negative_cases
-
-    print(f"Generated {len(positive_cases)} positive cases (should match)")
-    print(f"Generated {len(negative_cases)} negative cases (should NOT match)")
-    print(f"Sample positive: {positive_cases[:3]}...")
-    print(f"Sample negative: {negative_cases[:3]}...")
-
-    # Benchmark slow pattern
-    print("\n[BENCHMARKING ORIGINAL PATTERN...]")
+    # Optimize pattern (now includes benchmarking and validation)
+    print("\n[OPTIMIZING AND BENCHMARKING PATTERN...]")
     try:
-        slow_stats, slow_results = benchmark_regex(slow_pattern, test_data, number=100, repeat=5)
-        print_benchmark_results(f"Regex: {slow_pattern}", slow_stats)
+        result = optimize(slow_pattern, benchmark=True)
 
-        # Count matches for positive and negative cases
-        slow_positive_matches = sum(slow_results[:len(positive_cases)])
-        slow_negative_matches = sum(slow_results[len(positive_cases):])
+        # Extract data from result
+        optimized_pattern = result['optimized']
+        original_stats = result['original_benchmark']
+        optimized_stats = result['optimized_benchmark']
+        validation = result['validation']
+        speedup = result['speedup']
 
+        # Print test case information
+        print(f"\nGenerated {validation['positive_cases_count']} positive cases (should match)")
+        print(f"Generated {validation['negative_cases_count']} negative cases (should NOT match)")
+
+        # Print original benchmark
+        print("\n[ORIGINAL PATTERN BENCHMARK]")
+        print_benchmark_results(f"Regex: {slow_pattern}", original_stats)
         print(f"\nOriginal Pattern Results:")
-        print(f"  Positive cases: {slow_positive_matches}/{len(positive_cases)} matched")
-        print(f"  Negative cases: {slow_negative_matches}/{len(negative_cases)} matched (should be 0)")
+        print(f"  Positive cases: {validation['original_positive_matches']} matched")
+        print(f"  Negative cases: {validation['original_negative_matches']} matched (should be 0)")
 
-        # Optimize pattern
-        print("\n[OPTIMIZING PATTERN...]")
-        optimized_pattern = optimize(slow_pattern)
-
+        # Print optimized pattern
         print(f"\n[OPTIMIZED PATTERN]")
         print(f"Pattern: {optimized_pattern}")
 
-        # Benchmark optimized pattern
-        print("\n[BENCHMARKING OPTIMIZED PATTERN...]")
-        optimized_stats, optimized_results = benchmark_regex(optimized_pattern, test_data, number=100, repeat=5)
+        # Print optimized benchmark
+        print("\n[OPTIMIZED PATTERN BENCHMARK]")
         print_benchmark_results(f"Regex: {optimized_pattern}", optimized_stats)
-
-        # Count matches for positive and negative cases
-        opt_positive_matches = sum(optimized_results[:len(positive_cases)])
-        opt_negative_matches = sum(optimized_results[len(positive_cases):])
-
         print(f"\nOptimized Pattern Results:")
-        print(f"  Positive cases: {opt_positive_matches}/{len(positive_cases)} matched")
-        print(f"  Negative cases: {opt_negative_matches}/{len(negative_cases)} matched (should be 0)")
+        print(f"  Positive cases: {validation['optimized_positive_matches']} matched")
+        print(f"  Negative cases: {validation['optimized_negative_matches']} matched (should be 0)")
 
         # Validate results match
         print("\n" + "="*80)
         print("VALIDATION")
         print("="*80)
 
-        if slow_results == optimized_results:
+        if validation['results_match']:
             print("✅ PERFECT MATCH: Both patterns produce identical results on all test cases")
         else:
             print("⚠️  WARNING: Patterns produce different results!")
-            diff_count = sum(1 for a, b in zip(slow_results, optimized_results) if a != b)
-            print(f"   Total differences: {diff_count}/{len(test_data)} strings")
+            print(f"   Total differences: {validation['differences']}/{validation['total_tests']} strings")
 
-            # Show differences in detail
-            positive_diffs = sum(1 for i in range(len(positive_cases)) if slow_results[i] != optimized_results[i])
-            negative_diffs = sum(1 for i in range(len(positive_cases), len(test_data)) if slow_results[i] != optimized_results[i])
-
-            if positive_diffs > 0:
-                print(f"   Positive cases with differences: {positive_diffs}/{len(positive_cases)}")
-            if negative_diffs > 0:
-                print(f"   Negative cases with differences: {negative_diffs}/{len(negative_cases)}")
-
-        # Calculate speedup
-        speedup = slow_stats['mean'] / optimized_stats['mean']
-        time_saved = slow_stats['mean'] - optimized_stats['mean']
+        # Calculate and print speedup
+        time_saved = original_stats['mean'] - optimized_stats['mean']
 
         print("\n" + "⚡" * 40)
         print("REGEX PERFORMANCE IMPROVEMENT")
         print("⚡" * 40)
-        print(f"Original time:   {slow_stats['mean']:.6f} seconds")
+        print(f"Original time:   {original_stats['mean']:.6f} seconds")
         print(f"Optimized time:  {optimized_stats['mean']:.6f} seconds")
-        print(f"Time saved:      {time_saved:.6f} seconds ({time_saved/slow_stats['mean']*100:.1f}%)")
+        print(f"Time saved:      {time_saved:.6f} seconds ({time_saved/original_stats['mean']*100:.1f}%)")
         print(f"Speedup:         {speedup:.2f}x faster")
         print("⚡" * 40)
 
@@ -493,7 +473,8 @@ def run_function_with_sql_optimization(func):
 
     # Optimize the entire function (AI will detect SQL and optimize it)
     print("\n[OPTIMIZING FUNCTION...]")
-    optimized_source = optimize(func_source)
+    result = optimize(func_source, benchmark=False)
+    optimized_source = result['optimized']
 
     print("\n[OPTIMIZED FUNCTION]")
     print("-" * 80)

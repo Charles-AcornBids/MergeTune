@@ -217,11 +217,24 @@ def _is_regex_pattern(text: str) -> bool:
     """
     Detect if a string is likely a regex pattern.
     """
+    # Remove whitespace for analysis
+    stripped = text.strip()
+
+    # Python code keywords that indicate it's NOT a regex
+    python_keywords = ['def ', 'class ', 'import ', 'from ', 'return ', 'if ', 'for ', 'while ', 'try:', 'except']
+    if any(keyword in stripped for keyword in python_keywords):
+        return False
+
+    # If it has multiple lines with significant content, likely not a regex
+    lines = [line.strip() for line in stripped.split('\n') if line.strip()]
+    if len(lines) > 3:
+        return False
+
     # If it's short and contains regex metacharacters, likely a pattern
-    if len(text) < 200 and any(char in text for char in ['+', '*', '?', '|', '[', ']', '{', '}', '^', '$']):
+    if len(stripped) < 200 and any(char in stripped for char in ['+', '*', '?', '|', '[', ']', '{', '}', '^', '$']):
         # Try to compile it as regex
         try:
-            re.compile(text)
+            re.compile(stripped)
             return True
         except Exception:
             pass
@@ -569,31 +582,148 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
         }
 
 
-def optimize(code: str) -> str:
+def optimize(code: str, benchmark: bool = True) -> Dict[str, Any]:
     """
     Optimize code, SQL queries, or regex patterns.
 
     Args:
         code: The code, SQL query, or regex pattern to optimize
+        benchmark: If True, run benchmarks and validation (default: True)
 
     Returns:
-        Optimized version
+        Dictionary with:
+        - type: Type of code (sql, regex, python)
+        - original: Original code
+        - optimized: Optimized code
+        - original_benchmark: Benchmark results for original (if applicable)
+        - optimized_benchmark: Benchmark results for optimized (if applicable)
+        - speedup: Speedup factor (if benchmarked)
+        - validation: Validation results (if applicable)
+        - improvements: List of improvements made
     """
     # Detect input type: SQL, regex, or Python code
     is_sql = _is_sql_query(code)
     is_regex = _is_regex_pattern(code) if not is_sql else False
 
     if is_sql:
-        # Use dedicated SQL optimizer
+        # Use dedicated SQL optimizer (already returns full results)
         result = optimize_sql(code)
-        return result["optimized"]
+        return {
+            "type": "sql",
+            "original": result["original"],
+            "optimized": result["optimized"],
+            "original_benchmark": None,  # SQL doesn't execute, just static analysis
+            "optimized_benchmark": None,
+            "speedup": None,
+            "validation": {
+                "original_complexity": result["original_complexity"],
+                "optimized_complexity": result["optimized_complexity"],
+                "estimated_improvement": result["estimated_improvement"]
+            },
+            "improvements": result["improvements"]
+        }
+
     elif is_regex:
+        # Optimize regex pattern
         prompt = f"""Optimize this regex pattern:
 
 {code}
 
 Return only the optimized pattern, nothing else."""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2000
+            )
+
+            optimized = response.choices[0].message.content.strip()
+
+            # Remove markdown code blocks if present
+            if optimized.startswith("```"):
+                lines = optimized.split("\n")
+                optimized = "\n".join([line for line in lines if not line.startswith("```")])
+                optimized = optimized.strip()
+
+            # Remove quotes from regex patterns
+            optimized = optimized.strip('"\'`')
+
+            # Benchmark if requested
+            if benchmark:
+                # Generate test cases
+                positive_cases, negative_cases = generate_regex_test_cases(code, num_positive=25, num_negative=25)
+                test_data = positive_cases + negative_cases
+
+                # Benchmark original
+                original_stats, original_results = benchmark_regex(code, test_data, number=100, repeat=5)
+
+                # Benchmark optimized
+                optimized_stats, optimized_results = benchmark_regex(optimized, test_data, number=100, repeat=5)
+
+                # Calculate speedup
+                speedup = original_stats['mean'] / optimized_stats['mean'] if optimized_stats['mean'] > 0 else 0
+
+                # Validate results match
+                results_match = original_results == optimized_results
+                diff_count = sum(1 for a, b in zip(original_results, optimized_results) if a != b)
+
+                original_positive_matches = sum(original_results[:len(positive_cases)])
+                original_negative_matches = sum(original_results[len(positive_cases):])
+                optimized_positive_matches = sum(optimized_results[:len(positive_cases)])
+                optimized_negative_matches = sum(optimized_results[len(positive_cases):])
+
+                return {
+                    "type": "regex",
+                    "original": code,
+                    "optimized": optimized,
+                    "original_benchmark": original_stats,
+                    "optimized_benchmark": optimized_stats,
+                    "speedup": speedup,
+                    "validation": {
+                        "results_match": results_match,
+                        "differences": diff_count,
+                        "total_tests": len(test_data),
+                        "original_positive_matches": f"{original_positive_matches}/{len(positive_cases)}",
+                        "original_negative_matches": f"{original_negative_matches}/{len(negative_cases)}",
+                        "optimized_positive_matches": f"{optimized_positive_matches}/{len(positive_cases)}",
+                        "optimized_negative_matches": f"{optimized_negative_matches}/{len(negative_cases)}",
+                        "test_data": test_data,
+                        "positive_cases_count": len(positive_cases),
+                        "negative_cases_count": len(negative_cases)
+                    },
+                    "improvements": ["Pattern optimized for better performance"]
+                }
+            else:
+                return {
+                    "type": "regex",
+                    "original": code,
+                    "optimized": optimized,
+                    "original_benchmark": None,
+                    "optimized_benchmark": None,
+                    "speedup": None,
+                    "validation": None,
+                    "improvements": ["Pattern optimized for better performance"]
+                }
+
+        except Exception as e:
+            print(f"Error optimizing regex: {e}")
+            return {
+                "type": "regex",
+                "original": code,
+                "optimized": code,
+                "original_benchmark": None,
+                "optimized_benchmark": None,
+                "speedup": 1.0,
+                "validation": {"error": str(e)},
+                "improvements": ["Error occurred during optimization"]
+            }
+
     else:
+        # Python code optimization (no automatic benchmarking - requires execution context)
         prompt = f"""Optimize this Python code:
 
 ```python
@@ -602,39 +732,51 @@ Return only the optimized pattern, nothing else."""
 
 Return only the optimized code, nothing else."""
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=2000
-        )
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2000
+            )
 
-        optimized = response.choices[0].message.content.strip()
+            optimized = response.choices[0].message.content.strip()
 
-        # Remove markdown code blocks if present
-        if optimized.startswith("```"):
-            lines = optimized.split("\n")
-            optimized = "\n".join([line for line in lines if not line.startswith("```")])
-            optimized = optimized.strip()
+            # Remove markdown code blocks if present
+            if optimized.startswith("```"):
+                lines = optimized.split("\n")
+                optimized = "\n".join([line for line in lines if not line.startswith("```")])
+                optimized = optimized.strip()
 
-        # Remove language identifier if present
-        if optimized.startswith("python\n"):
-            optimized = optimized[7:]
-        elif optimized.startswith("sql\n"):
-            optimized = optimized[4:]
+            # Remove language identifier if present
+            if optimized.startswith("python\n"):
+                optimized = optimized[7:]
 
-        # Remove quotes from regex patterns
-        if is_regex:
-            optimized = optimized.strip('"\'`')
+            return {
+                "type": "python",
+                "original": code,
+                "optimized": optimized,
+                "original_benchmark": None,
+                "optimized_benchmark": None,
+                "speedup": None,
+                "validation": {"note": "Python code requires manual benchmarking with execution context"},
+                "improvements": ["Code optimized for better performance"]
+            }
 
-        return optimized
-
-    except Exception as e:
-        print(f"Error: {e}")
-        return code
+        except Exception as e:
+            print(f"Error optimizing Python code: {e}")
+            return {
+                "type": "python",
+                "original": code,
+                "optimized": code,
+                "original_benchmark": None,
+                "optimized_benchmark": None,
+                "speedup": None,
+                "validation": {"error": str(e)},
+                "improvements": ["Error occurred during optimization"]
+            }
 
 
 def generate_regex_test_data(pattern: str, num_samples: int = 100) -> List[str]:
