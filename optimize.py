@@ -37,6 +37,7 @@ def generate_default_values(code_func: Callable, **existing_kwargs) -> Dict[str,
     Returns:
         Dictionary of parameter names to generated default values
     """
+    print(f"[Progress] Analyzing function parameters for {code_func.__name__}...")
     sig = inspect.signature(code_func)
     missing_params = []
 
@@ -51,8 +52,10 @@ def generate_default_values(code_func: Callable, **existing_kwargs) -> Dict[str,
             })
 
     if not missing_params:
+        print("[Progress] No missing parameters - using existing kwargs")
         return existing_kwargs
 
+    print(f"[Progress] Found {len(missing_params)} missing parameters, calling AI to generate defaults...")
     # Get function source code for context
     try:
         func_source = inspect.getsource(code_func)
@@ -75,6 +78,7 @@ For numeric parameters, use small to medium-sized values (e.g., 10-1000).
 """
 
     try:
+        print("[Progress] Calling GPT-4o-mini to generate default values...")
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -85,6 +89,7 @@ For numeric parameters, use small to medium-sized values (e.g., 10-1000).
             max_tokens=500
         )
 
+        print("[Progress] AI response received, parsing values...")
         generated_values_str = response.choices[0].message.content.strip()
 
         # Remove markdown code blocks if present
@@ -381,6 +386,7 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
         - operations: Dict of operation counts
         - details: Additional details about the query
     """
+    print("[Progress] Analyzing SQL query complexity...")
     parsed = sqlparse.parse(query)
     if not parsed:
         return {
@@ -403,6 +409,7 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
 
     query_upper = query.upper()
 
+    print("[Progress] Checking for SQL anti-patterns...")
     # Check for SELECT *
     if re.search(r'SELECT\s+\*', query, re.IGNORECASE):
         issues.append("Using SELECT * (specify columns instead)")
@@ -456,6 +463,7 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
         tables = [t.strip() for t in from_match.group(1).split(',')]
         operations["tables"] = len(tables)
 
+    print("[Progress] Calculating complexity score...")
     # Calculate complexity score
     score = (
         operations["joins"] * 10 +
@@ -475,6 +483,7 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
         "estimated_rows_scanned": "unknown" if "WHERE" in query_upper else "all rows"
     }
 
+    print(f"[Progress] SQL complexity analysis complete - Score: {score}, Issues: {len(issues)}")
     return {
         "score": score,
         "issues": issues if issues else ["No major issues detected"],
@@ -501,6 +510,7 @@ def optimize_sql(query: str, schema: str = "", context: str = "") -> Dict[str, A
         - optimized_complexity: Complexity analysis of optimized
         - estimated_improvement: Estimated improvement percentage
     """
+    print("[Progress] Starting SQL optimization...")
     # Analyze original query
     original_complexity = analyze_sql_complexity(query)
 
@@ -531,6 +541,7 @@ Focus on:
 Return ONLY the optimized SQL query, nothing else. No explanations, no markdown formatting."""
 
     try:
+        print("[Progress] Calling GPT-4o for SQL optimization...")
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -541,6 +552,7 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
             max_tokens=2000
         )
 
+        print("[Progress] AI optimization received, processing response...")
         optimized_query = response.choices[0].message.content.strip()
 
         # Remove markdown code blocks if present
@@ -554,6 +566,7 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
         if optimized_query.startswith("sql\n"):
             optimized_query = optimized_query[4:]
 
+        print("[Progress] Analyzing optimized query complexity...")
         # Analyze optimized query
         optimized_complexity = analyze_sql_complexity(optimized_query)
 
@@ -581,6 +594,7 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
         if not improvements:
             improvements.append("Query structure refined for better clarity")
 
+        print(f"[Progress] SQL optimization complete - Estimated improvement: {improvement_pct:.1f}%")
         return {
             "original": query,
             "optimized": optimized_query,

@@ -271,99 +271,110 @@ def extract_optimizable_code(file_path: str, content: str) -> List[Dict[str, Any
     return optimizable
 
 
-def format_optimization_suggestions(optimizations: List[Dict[str, Any]]) -> str:
+def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Format optimization suggestions as a markdown comment for GitHub PR.
+    Format a single optimization as a GitHub code suggestion review comment.
 
     Args:
-        optimizations: List of optimization results
+        opt: Single optimization result
 
     Returns:
-        Formatted markdown string
+        Dict with 'path', 'line', 'body' for GitHub review comment
     """
-    if not optimizations:
-        return "No significant optimization opportunities found. Great work! 🎉"
+    result = opt['result']
+    location = opt['location']
+    description = opt['description']
+    opt_type = opt.get('type', result.get('type', 'unknown'))
 
-    comment = "# 🚀 MergeTune Optimization Suggestions\n\n"
-    comment += f"Found **{len(optimizations)}** optimization opportunities in this PR:\n\n"
+    # Parse location (format: "file_path:line_start-line_end" or "file_path:line_num")
+    # Try multi-line format first
+    location_match = re.match(r'([^:]+):(\d+)-(\d+)', location)
+    if location_match:
+        file_path = location_match.group(1)
+        line_start = int(location_match.group(2))
+        line_end = int(location_match.group(3))
+    else:
+        # Try single-line format
+        location_match = re.match(r'([^:]+):(\d+)', location)
+        if not location_match:
+            return None
+        file_path = location_match.group(1)
+        line_start = int(location_match.group(2))
+        line_end = line_start
 
-    for i, opt in enumerate(optimizations, 1):
-        result = opt['result']
-        location = opt['location']
-        description = opt['description']
-        opt_type = opt.get('type', result.get('type', 'unknown'))
+    # Build the comment body with GitHub code suggestion syntax
+    comment = f"**🚀 MergeTune Optimization Suggestion**\n\n"
+    comment += f"**Issue:** {description}\n\n"
 
-        comment += f"## {i}. {description}\n\n"
-        comment += f"**Location:** `{location}`\n\n"
+    # Add type-specific details
+    if opt_type == 'speedup':
+        if opt.get('suggestion'):
+            comment += f"**Suggestion:** {opt['suggestion']}\n\n"
 
-        # Add type-specific details
-        if opt_type == 'speedup':
-            # Individual Python speedup opportunity
-            comment += "**Type:** Performance Speedup\n\n"
+        if result.get('improvements'):
+            comment += "**Improvements:**\n"
+            for imp in result['improvements']:
+                comment += f"- {imp}\n"
+            comment += "\n"
 
-            if opt.get('suggestion'):
-                comment += f"**Suggestion:** {opt['suggestion']}\n\n"
+        # Add the code suggestion
+        comment += "```suggestion\n"
+        comment += result['optimized'].strip() + "\n"
+        comment += "```\n"
 
-            comment += "**Current Code:**\n```python\n" + \
-                result['original'].strip() + "\n```\n\n"
-            comment += "**Optimized Code:**\n```python\n" + \
-                result['optimized'].strip() + "\n```\n\n"
+    elif opt_type == 'sql' or result['type'] == 'sql':
+        if result.get('validation'):
+            val = result['validation']
+            orig_score = val['original_complexity']['score']
+            opt_score = val['optimized_complexity']['score']
+            improvement = val['estimated_improvement']
+            comment += f"**Complexity Score:** {orig_score} → {opt_score} ({improvement:.1f}% improvement)\n\n"
 
-            if result.get('improvements'):
-                comment += "**Improvements:**\n"
-                for imp in result['improvements']:
-                    comment += f"- {imp}\n"
-                comment += "\n"
+        if result.get('improvements'):
+            comment += "**Improvements:**\n"
+            for imp in result['improvements']:
+                comment += f"- {imp}\n"
+            comment += "\n"
 
-        elif opt_type == 'sql' or result['type'] == 'sql':
-            comment += "**Type:** SQL Query Optimization\n\n"
+        # Add the code suggestion
+        comment += "```suggestion\n"
+        comment += result['optimized'].strip() + "\n"
+        comment += "```\n"
 
-            if result.get('validation'):
-                val = result['validation']
-                orig_score = val['original_complexity']['score']
-                opt_score = val['optimized_complexity']['score']
-                improvement = val['estimated_improvement']
+    elif opt_type == 'regex' or result['type'] == 'regex':
+        if result.get('speedup') and result['speedup'] > 1:
+            comment += f"**Performance:** {result['speedup']:.2f}x faster\n\n"
 
-                comment += f"**Complexity Score:** {orig_score} → {opt_score} ({improvement:.1f}% improvement)\n\n"
+        if result.get('improvements'):
+            comment += "**Improvements:**\n"
+            for imp in result['improvements']:
+                comment += f"- {imp}\n"
+            comment += "\n"
 
-            comment += "**Original Query:**\n```sql\n" + \
-                result['original'].strip() + "\n```\n\n"
-            comment += "**Optimized Query:**\n```sql\n" + \
-                result['optimized'].strip() + "\n```\n\n"
+        # For regex, suggest the optimized pattern
+        comment += "```suggestion\n"
+        comment += result['optimized'].strip() + "\n"
+        comment += "```\n"
 
-            if result.get('improvements'):
-                comment += "**Improvements:**\n"
-                for imp in result['improvements']:
-                    comment += f"- {imp}\n"
-                comment += "\n"
+    elif result['type'] == 'python':
+        if result.get('improvements'):
+            comment += "**Improvements:**\n"
+            for imp in result['improvements']:
+                comment += f"- {imp}\n"
+            comment += "\n"
 
-        elif opt_type == 'regex' or result['type'] == 'regex':
-            comment += "**Type:** Regex Pattern Optimization\n\n"
-            comment += f"**Original Pattern:** `{result['original']}`\n\n"
-            comment += f"**Optimized Pattern:** `{result['optimized']}`\n\n"
-
-            if result.get('speedup') and result['speedup'] > 1:
-                comment += f"**Performance:** {result['speedup']:.2f}x faster\n\n"
-
-        elif result['type'] == 'python':
-            # Fallback for general Python optimization
-            comment += "**Type:** Python Code Optimization\n\n"
-            comment += "**Original Code:**\n```python\n" + \
-                result['original'].strip() + "\n```\n\n"
-            comment += "**Optimized Code:**\n```python\n" + \
-                result['optimized'].strip() + "\n```\n\n"
-
-            if result.get('improvements'):
-                comment += "**Improvements:**\n"
-                for imp in result['improvements']:
-                    comment += f"- {imp}\n"
-                comment += "\n"
-
-        comment += "---\n\n"
+        # Add the code suggestion
+        comment += "```suggestion\n"
+        comment += result['optimized'].strip() + "\n"
+        comment += "```\n"
 
     comment += "\n*Generated by MergeTune - AI-powered code optimization*"
 
-    return comment
+    return {
+        'path': file_path,
+        'line': line_start,
+        'body': comment
+    }
 
 
 async def session_action(session):
@@ -792,69 +803,94 @@ Do not summarize or truncate file contents. Include every line of code."""}
 
     print(f"\n✅ Found {len(all_optimizations)} optimization suggestion(s)")
 
-    # Step 4: Format and post suggestions as a comment
+    # Step 4: Post suggestions as individual code suggestion review comments
     if all_optimizations:
-        print("\n💬 Posting optimization suggestions to PR...")
+        print("\n💬 Posting code suggestion review comments to PR...")
 
-        comment_body = format_optimization_suggestions(all_optimizations)
+        # Format each optimization as a code suggestion
+        suggestions = []
+        for opt in all_optimizations:
+            suggestion = format_code_suggestion(opt)
+            if suggestion:
+                suggestions.append(suggestion)
 
-        messages = [
-            {"role": "user", "content": f"""Use the create_issue_comment or add_comment_to_pull_request tool to post a comment on pull request #{pr_number} in repository {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}.
+        print(f"   Formatted {len(suggestions)} code suggestion(s)")
 
-IMPORTANT: Call the appropriate tool with:
+        # Post each suggestion as a review comment
+        comments_posted = 0
+        for i, suggestion in enumerate(suggestions, 1):
+            print(f"\n   Posting suggestion {i}/{len(suggestions)} for {suggestion['path']}:{suggestion['line']}...")
+
+            messages = [
+                {"role": "user", "content": f"""Use the create_review_comment or add_review_comment tool to post a review comment on pull request #{pr_number} in repository {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}.
+
+IMPORTANT: Call the appropriate tool with these EXACT parameters:
 - owner: {GITHUB_REPO_OWNER}
 - repo: {GITHUB_REPO_NAME}
-- pull_request_number or issue_number: {pr_number}
+- pull_request_number or pull_number: {pr_number}
+- path: {suggestion['path']}
+- line: {suggestion['line']}
 - body: (the exact comment text below - DO NOT modify or add any additional content)
 
 Comment body to post:
-{comment_body}"""}
-        ]
+{suggestion['body']}
 
-        comment_posted = False
+If the create_review_comment tool is not available, try these alternatives in order:
+1. create_pull_request_review_comment
+2. add_comment_to_pull_request_file
+3. Any other tool that can add a line-specific comment to a PR
 
-        for _ in range(10):
-            response = await openai.chat.completions.create(
-                messages=messages,
-                model="gpt-5-mini",
-                tools=session["tools"]
-            )
+CRITICAL: The comment MUST be posted on line {suggestion['line']} of file {suggestion['path']}, not as a general PR comment."""}
+            ]
 
-            choice = response.choices[0]
-            tool_calls = choice.message.tool_calls
+            comment_posted = False
 
-            if not tool_calls:
-                content = choice.message.content
-                print(f"   Response: {content}")
+            for attempt in range(10):
+                response = await openai.chat.completions.create(
+                    messages=messages,
+                    model="gpt-5-mini",
+                    tools=session["tools"]
+                )
 
-                # Check if comment was posted
-                if "comment" in content.lower() and ("posted" in content.lower() or "added" in content.lower() or "created" in content.lower()):
-                    print("✅ Comment posted successfully!")
-                    comment_posted = True
-                break
+                choice = response.choices[0]
+                tool_calls = choice.message.tool_calls
 
-            tool_responses = await session["callTools"](tool_calls)
+                if not tool_calls:
+                    content = choice.message.content
+                    print(f"      Response: {content[:100]}...")
 
-            messages.append({
-                "role": "assistant",
-                "tool_calls": choice.message.tool_calls
-            })
-            messages.extend(tool_responses)
-
-            # Check if comment was posted in responses
-            for resp in tool_responses:
-                if resp.get('role') == 'tool':
-                    content = resp.get('content', '')
-                    if content and ('id' in content or 'created' in content.lower()):
-                        print("✅ Comment posted successfully!")
+                    # Check if comment was posted
+                    if "comment" in content.lower() and ("posted" in content.lower() or "added" in content.lower() or "created" in content.lower()):
+                        print(f"      ✅ Suggestion {i} posted successfully!")
                         comment_posted = True
-                        break
+                        comments_posted += 1
+                    break
 
-            if comment_posted:
-                break
+                tool_responses = await session["callTools"](tool_calls)
 
-        if not comment_posted:
-            print("⚠️  Could not confirm comment was posted")
+                messages.append({
+                    "role": "assistant",
+                    "tool_calls": choice.message.tool_calls
+                })
+                messages.extend(tool_responses)
+
+                # Check if comment was posted in responses
+                for resp in tool_responses:
+                    if resp.get('role') == 'tool':
+                        resp_content = resp.get('content', '')
+                        if resp_content and ('id' in resp_content or 'created' in resp_content.lower()):
+                            print(f"      ✅ Suggestion {i} posted successfully!")
+                            comment_posted = True
+                            comments_posted += 1
+                            break
+
+                if comment_posted:
+                    break
+
+            if not comment_posted:
+                print(f"      ⚠️  Could not confirm suggestion {i} was posted")
+
+        print(f"\n✅ Posted {comments_posted}/{len(suggestions)} code suggestion(s) to PR")
     else:
         print("\n✨ No optimization opportunities found - code looks great!")
 
