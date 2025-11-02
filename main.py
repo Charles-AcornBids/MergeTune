@@ -120,9 +120,14 @@ def identify_individual_speedups(code: str, file_path: str, start_line: int = 1)
 
 For each optimization opportunity, provide:
 1. The specific code snippet that needs optimization (extract just the relevant lines)
-2. The line numbers where it appears (relative to the start of the code)
+2. The line numbers where it appears - IMPORTANT: Line numbers must be 1-indexed relative to the code above, where line 1 is the FIRST line shown above
 3. A brief description of the performance issue
 4. A suggested optimization approach
+
+CRITICAL: Line numbering example:
+- If the first line of the code above needs optimization, use "line_start": 1
+- If the second line needs optimization, use "line_start": 2
+- If lines 5-7 need optimization, use "line_start": 5, "line_end": 7
 
 Return ONLY a JSON array in this exact format (no markdown, no explanation):
 [
@@ -176,10 +181,20 @@ If there are no significant optimization opportunities, return an empty array: [
         speedups = json.loads(result_str)
 
         # Adjust line numbers to be absolute
+        # The LLM returns 1-indexed line numbers relative to the code snippet
+        # start_line is the 1-indexed line number in the file where the code starts
+        # So: absolute_line = start_line + (relative_line - 1)
         for speedup in speedups:
-            speedup['line_start'] = start_line + speedup['line_start'] - 1
-            speedup['line_end'] = start_line + speedup['line_end'] - 1
+            relative_start = speedup['line_start']
+            relative_end = speedup['line_end']
+
+            # Convert relative line numbers to absolute
+            speedup['line_start'] = start_line + relative_start - 1
+            speedup['line_end'] = start_line + relative_end - 1
             speedup['location'] = f"{file_path}:{speedup['line_start']}-{speedup['line_end']}"
+
+            # Debug output
+            print(f"      Line number mapping: relative {relative_start}-{relative_end} -> absolute {speedup['line_start']}-{speedup['line_end']}")
 
         return speedups
 
@@ -204,17 +219,19 @@ def extract_functions_from_code(code: str) -> List[Dict[str, Any]]:
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
                 # Get the function's source code
-                start_line = node.lineno - 1  # 0-indexed
-                end_line = node.end_lineno if hasattr(
-                    node, 'end_lineno') else start_line + 1
+                # node.lineno and node.end_lineno are both 1-indexed
+                start_line = node.lineno - 1  # Convert to 0-indexed for slicing
+                end_line_absolute = node.end_lineno if hasattr(
+                    node, 'end_lineno') else node.lineno
 
-                func_code = '\n'.join(lines[start_line:end_line])
+                # Extract function code (slicing is exclusive of end, so we use end_line_absolute directly)
+                func_code = '\n'.join(lines[start_line:end_line_absolute])
 
                 functions.append({
                     'name': node.name,
                     'code': func_code,
-                    'line_start': node.lineno,
-                    'line_end': end_line + 1
+                    'line_start': node.lineno,  # 1-indexed, line where function starts
+                    'line_end': end_line_absolute  # 1-indexed, line where function ends (inclusive)
                 })
     except SyntaxError as e:
         print(f"⚠️  Syntax error parsing code: {e}")
@@ -230,15 +247,21 @@ def extract_optimizable_code(file_path: str, content: str) -> List[Dict[str, Any
         List of dicts with 'type', 'code', 'location', 'description'
     """
     optimizable = []
+    lines = content.split('\n')
 
     # Extract SQL queries
     sql_queries = _extract_sql_from_code(content)
     for sql, start_line, end_line in sql_queries:
+        # Get the full line(s) of code for context (to preserve indentation and variable assignment)
+        full_lines = '\n'.join(lines[start_line - 1:end_line])
+
         optimizable.append({
             'type': 'sql',
             'code': sql,
             'location': f"{file_path}:{start_line}-{end_line}",
-            'description': f"SQL query at lines {start_line}-{end_line}"
+            'description': f"SQL query at lines {start_line}-{end_line}",
+            'full_lines': full_lines.rstrip(),
+            'original_sql': sql
         })
 
     # Extract functions (we'll optimize the entire function)
@@ -291,31 +314,34 @@ def extract_optimizable_code(file_path: str, content: str) -> List[Dict[str, Any
 
 def reconstruct_code_with_optimization(original_code: str, original_pattern: str, optimized_pattern: str) -> str:
     """
-    Use LLM to reconstruct complete code with the optimized pattern,
-    preserving variable names, quotes style, and other context.
+    Use LLM to reconstruct complete code with an optimized pattern (regex, SQL, etc.),
+    preserving variable names, quotes style, indentation, and other context.
 
     Args:
         original_code: The original line(s) of code
-        original_pattern: The original regex pattern
-        optimized_pattern: The optimized regex pattern
+        original_pattern: The original pattern (regex, SQL query, etc.)
+        optimized_pattern: The optimized pattern
 
     Returns:
         Complete reconstructed code with optimized pattern
     """
-    prompt = f"""You are reconstructing a line of Python code with an optimized regex pattern.
+    prompt = f"""You are reconstructing Python code with an optimized pattern (could be SQL query, regex, or other pattern).
 
 Original code:
 {original_code}
 
-Original regex pattern:
+Original pattern to replace:
 {original_pattern}
 
-Optimized regex pattern:
+Optimized pattern:
 {optimized_pattern}
 
-Replace ONLY the regex pattern in the original code with the optimized pattern, keeping everything else exactly the same (variable names, quote style, r-prefix, indentation/whitespace at the beginning, etc.).
-
-CRITICAL: Preserve the exact indentation/leading whitespace from the original code.
+Replace ONLY the pattern/query in the original code with the optimized version, keeping everything else exactly the same:
+- Preserve exact indentation/leading whitespace
+- Preserve variable names
+- Preserve quote style (single/double/triple quotes)
+- Preserve any prefixes (f-string, r-string, etc.)
+- Preserve any surrounding code structure
 
 Return ONLY the complete reconstructed code line(s), nothing else. No explanations, no markdown."""
 
@@ -323,11 +349,11 @@ Return ONLY the complete reconstructed code line(s), nothing else. No explanatio
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You reconstruct code by replacing patterns while preserving all other context. Return only the code, no explanations."},
+                {"role": "system", "content": "You reconstruct code by replacing patterns (SQL, regex, etc.) while preserving all other context including indentation, variable names, and code structure. Return only the code, no explanations."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=500
+            max_tokens=1000
         )
 
         reconstructed = response.choices[0].message.content.rstrip()
@@ -416,10 +442,27 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
                 comment += f"- {imp}\n"
             comment += "\n"
 
-        # Add the code suggestion
-        comment += "```suggestion\n"
-        comment += result['optimized'].rstrip() + "\n"
-        comment += "```\n"
+        # For SQL, reconstruct the full line(s) with the optimized SQL query
+        full_lines = opt.get('full_lines', '')
+        original_sql = opt.get('original_sql', result['original'])
+        optimized_sql = opt.get('optimized_sql', result['optimized'])
+
+        if full_lines:
+            # Use LLM to reconstruct complete code with optimized SQL
+            print(f"      Reconstructing SQL code with optimized query...")
+            reconstructed_code = reconstruct_code_with_optimization(
+                full_lines,
+                original_sql,
+                optimized_sql
+            )
+            comment += "```suggestion\n"
+            comment += reconstructed_code.rstrip() + "\n"
+            comment += "```\n"
+        else:
+            # Fallback: suggest just the SQL
+            comment += "```suggestion\n"
+            comment += result['optimized'].rstrip() + "\n"
+            comment += "```\n"
 
     elif opt_type == 'regex' or result['type'] == 'regex':
         if result.get('speedup') and result['speedup'] > 1:
@@ -466,6 +509,9 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
         comment += "```\n"
 
     comment += "\n*Generated by MergeTune - AI-powered code optimization*"
+
+    # Debug output
+    print(f"      GitHub suggestion will be posted at {file_path}:{line_start}")
 
     return {
         'path': file_path,
@@ -804,6 +850,7 @@ Do not summarize or truncate file contents. Include every line of code."""}
                 if segment['type'] == 'python':
                     # For Python code, identify individual speedup opportunities
                     print(f"    Analyzing {segment['description']}...")
+                    print(f"      Function starts at line {segment.get('line_start', 1)} in file")
 
                     speedups = identify_individual_speedups(
                         segment['code'],
@@ -816,8 +863,9 @@ Do not summarize or truncate file contents. Include every line of code."""}
                     # Optimize each individual speedup
                     for speedup in speedups:
                         try:
+                            issue_preview = speedup['issue'][:50]
                             print(
-                                f"        Optimizing: {speedup['issue'][:50]}...")
+                                f"        Optimizing: {issue_preview}...")
 
                             # Run optimization on the specific code snippet
                             result = optimize(
@@ -836,7 +884,7 @@ Do not summarize or truncate file contents. Include every line of code."""}
                             if result['optimized'] != result['original']:
                                 all_optimizations.append({
                                     'location': speedup['location'],
-                                    'description': f"{speedup['issue']}",
+                                    'description': speedup['issue'],
                                     'suggestion': speedup['suggestion'],
                                     'result': result,
                                     'type': 'speedup'
@@ -864,7 +912,10 @@ Do not summarize or truncate file contents. Include every line of code."""}
                             'location': segment['location'],
                             'description': segment['description'],
                             'result': result,
-                            'type': 'sql'
+                            'type': 'sql',
+                            'full_lines': segment.get('full_lines', ''),
+                            'original_sql': segment.get('original_sql', result['original']),
+                            'optimized_sql': result['optimized']
                         })
                         print("      ✅ Optimization found!")
                     else:
