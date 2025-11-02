@@ -3,11 +3,12 @@ import statistics
 import inspect
 import os
 import re
-from typing import Callable, Any, Dict, List, Tuple
+import sqlparse
+from sqlparse.sql import IdentifierList, Identifier, Where, Function, Comparison
+from sqlparse.tokens import Keyword, DML
+from typing import Callable, Any, Dict, List, Tuple, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
-from inquirer import List as InquirerList, prompt
-from inquirer.themes import GreenPassion
 
 # Load environment variables
 load_dotenv()
@@ -228,27 +229,372 @@ def _is_regex_pattern(text: str) -> bool:
     return False
 
 
-def optimize(code: str) -> str:
+def _is_sql_query(text: str) -> bool:
     """
-    Optimize code or regex patterns.
+    Detect if a string is likely a SQL query.
+    """
+    # Strip whitespace and convert to uppercase for checking
+    text_upper = text.strip().upper()
+
+    # Check for SQL keywords at the start
+    sql_keywords = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'WITH']
+    if any(text_upper.startswith(keyword) for keyword in sql_keywords):
+        return True
+
+    # Try to parse as SQL
+    try:
+        parsed = sqlparse.parse(text)
+        if parsed and len(parsed) > 0:
+            # Check if it has SQL statement types
+            for statement in parsed:
+                if statement.get_type() in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'UNKNOWN']:
+                    # UNKNOWN might be valid SQL too, so check for FROM, WHERE, JOIN
+                    tokens_str = str(statement).upper()
+                    if any(kw in tokens_str for kw in ['FROM', 'WHERE', 'JOIN', 'GROUP BY', 'ORDER BY', 'SET', 'VALUES']):
+                        return True
+                    if statement.get_type() != 'UNKNOWN':
+                        return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _extract_sql_from_code(code: str) -> List[Tuple[str, int, int]]:
+    """
+    Extract SQL queries from Python code (strings, multiline strings, etc.).
+
+    Returns:
+        List of tuples (sql_query, start_line, end_line)
+    """
+    sql_queries = []
+
+    # Pattern to find SQL in strings (both single and triple quoted)
+    # Look for strings that contain SQL keywords
+    lines = code.split('\n')
+    current_sql = []
+    in_sql_string = False
+    start_line = 0
+    quote_type = None
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+
+        # Check for start of multiline string with SQL
+        if not in_sql_string:
+            for qt in ['"""', "'''", '"', "'"]:
+                if qt in stripped:
+                    # Extract the string content
+                    potential_sql = stripped
+                    # Remove common prefixes (f-string, raw string, etc.)
+                    potential_sql = re.sub(r'^[frFR]*["\']', '', potential_sql)
+
+                    if any(kw in potential_sql.upper() for kw in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'FROM', 'WHERE']):
+                        in_sql_string = True
+                        start_line = i
+                        quote_type = qt
+                        current_sql.append(line)
+
+                        # Check if it's a single-line string
+                        if stripped.count(qt) >= 2:
+                            in_sql_string = False
+                            sql_text = '\n'.join(current_sql)
+                            # Try to extract just the SQL part
+                            extracted = _extract_sql_string_content(sql_text)
+                            if extracted and _is_sql_query(extracted):
+                                sql_queries.append((extracted, start_line, i))
+                            current_sql = []
+                        break
+        else:
+            current_sql.append(line)
+            if quote_type in line:
+                in_sql_string = False
+                sql_text = '\n'.join(current_sql)
+                extracted = _extract_sql_string_content(sql_text)
+                if extracted and _is_sql_query(extracted):
+                    sql_queries.append((extracted, start_line, i))
+                current_sql = []
+
+    return sql_queries
+
+
+def _extract_sql_string_content(text: str) -> Optional[str]:
+    """
+    Extract SQL content from a Python string assignment.
+    Handles f-strings, raw strings, and regular strings.
+    """
+    # Remove common Python string prefixes and quotes
+    patterns = [
+        r'[frFR]*"""(.+?)"""',
+        r"[frFR]*'''(.+?)'''",
+        r'[frFR]*"(.+?)"',
+        r"[frFR]*'(.+?)'",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+    # If no match, try to clean it up manually
+    text = re.sub(r'^[^"\']*["\']', '', text)
+    text = re.sub(r'["\'][^"\']*$', '', text)
+    return text.strip()
+
+
+def analyze_sql_complexity(query: str) -> Dict[str, Any]:
+    """
+    Analyze SQL query complexity without executing it.
 
     Args:
-        code: The code or regex pattern to optimize
+        query: SQL query string
+
+    Returns:
+        Dictionary with complexity metrics and issues:
+        - score: Complexity score (higher = more complex/problematic)
+        - issues: List of detected anti-patterns
+        - operations: Dict of operation counts
+        - details: Additional details about the query
+    """
+    parsed = sqlparse.parse(query)
+    if not parsed:
+        return {
+            "score": 0,
+            "issues": ["Unable to parse SQL query"],
+            "operations": {},
+            "details": {}
+        }
+
+    statement = parsed[0]
+    issues = []
+    operations = {
+        "joins": 0,
+        "subqueries": 0,
+        "wildcards": 0,
+        "functions": 0,
+        "or_conditions": 0,
+        "tables": 0,
+    }
+
+    query_upper = query.upper()
+
+    # Check for SELECT *
+    if re.search(r'SELECT\s+\*', query, re.IGNORECASE):
+        issues.append("Using SELECT * (specify columns instead)")
+        operations["wildcards"] += 1
+
+    # Count JOINs
+    join_count = len(re.findall(r'\bJOIN\b', query_upper))
+    operations["joins"] = join_count
+    if join_count > 3:
+        issues.append(f"Many JOINs ({join_count}) - consider denormalization or restructuring")
+
+    # Count subqueries
+    subquery_count = query.count('(SELECT') + query.count('( SELECT')
+    operations["subqueries"] = subquery_count
+    if subquery_count > 2:
+        issues.append(f"Multiple subqueries ({subquery_count}) - consider CTEs or JOINs")
+
+    # Check for OR conditions (can be slow)
+    or_count = len(re.findall(r'\bOR\b', query_upper))
+    operations["or_conditions"] = or_count
+    if or_count > 3:
+        issues.append(f"Many OR conditions ({or_count}) - consider IN clause or UNION")
+
+    # Check for functions that might be expensive
+    expensive_functions = ['DISTINCT', 'GROUP BY', 'ORDER BY', 'HAVING']
+    for func in expensive_functions:
+        if func in query_upper:
+            operations["functions"] += 1
+
+    # Check for missing WHERE clause in SELECT
+    if query_upper.strip().startswith('SELECT') and 'WHERE' not in query_upper:
+        if 'LIMIT' not in query_upper:
+            issues.append("No WHERE clause - will scan entire table")
+
+    # Check for LIKE with leading wildcard
+    if re.search(r"LIKE\s+['\"]%", query, re.IGNORECASE):
+        issues.append("LIKE with leading wildcard (%) prevents index usage")
+
+    # Check for NOT IN (can be slow)
+    if 'NOT IN' in query_upper:
+        issues.append("NOT IN clause - consider LEFT JOIN with NULL check instead")
+
+    # Count tables (approximate)
+    from_match = re.search(r'FROM\s+([\w\s,]+?)(?:WHERE|JOIN|GROUP|ORDER|LIMIT|;|$)', query, re.IGNORECASE)
+    if from_match:
+        tables = [t.strip() for t in from_match.group(1).split(',')]
+        operations["tables"] = len(tables)
+
+    # Calculate complexity score
+    score = (
+        operations["joins"] * 10 +
+        operations["subqueries"] * 15 +
+        operations["wildcards"] * 5 +
+        operations["functions"] * 3 +
+        operations["or_conditions"] * 2 +
+        len(issues) * 8
+    )
+
+    # Estimate query characteristics
+    details = {
+        "query_type": statement.get_type(),
+        "has_where": "WHERE" in query_upper,
+        "has_index_hints": "INDEX" in query_upper or "USE INDEX" in query_upper,
+        "has_limit": "LIMIT" in query_upper,
+        "estimated_rows_scanned": "unknown" if "WHERE" in query_upper else "all rows"
+    }
+
+    return {
+        "score": score,
+        "issues": issues if issues else ["No major issues detected"],
+        "operations": operations,
+        "details": details
+    }
+
+
+def optimize_sql(query: str, schema: str = "", context: str = "") -> Dict[str, Any]:
+    """
+    Optimize SQL query using GPT-4o with static analysis.
+
+    Args:
+        query: SQL query to optimize
+        schema: Optional database schema information
+        context: Optional context about the use case
+
+    Returns:
+        Dictionary with:
+        - original: Original query
+        - optimized: Optimized query
+        - improvements: List of improvements made
+        - original_complexity: Complexity analysis of original
+        - optimized_complexity: Complexity analysis of optimized
+        - estimated_improvement: Estimated improvement percentage
+    """
+    # Analyze original query
+    original_complexity = analyze_sql_complexity(query)
+
+    # Build prompt for GPT-4o
+    prompt = f"""Optimize this SQL query for better performance:
+
+```sql
+{query}
+```
+
+"""
+
+    if schema:
+        prompt += f"\nDatabase Schema:\n{schema}\n"
+
+    if context:
+        prompt += f"\nContext: {context}\n"
+
+    prompt += """
+Focus on:
+1. Index usage optimization
+2. Reducing unnecessary operations
+3. Rewriting subqueries as JOINs where appropriate
+4. Using CTEs for better readability
+5. Avoiding SELECT *
+6. Removing redundant conditions
+
+Return ONLY the optimized SQL query, nothing else. No explanations, no markdown formatting."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a SQL optimization expert. Return only optimized SQL queries without any explanation or formatting."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+
+        optimized_query = response.choices[0].message.content.strip()
+
+        # Remove markdown code blocks if present
+        if optimized_query.startswith("```"):
+            lines = optimized_query.split("\n")
+            optimized_query = "\n".join([line for line in lines if not line.startswith("```")])
+            optimized_query = optimized_query.strip()
+
+        # Remove language identifier if present
+        if optimized_query.startswith("sql\n"):
+            optimized_query = optimized_query[4:]
+
+        # Analyze optimized query
+        optimized_complexity = analyze_sql_complexity(optimized_query)
+
+        # Calculate improvement
+        if original_complexity["score"] > 0:
+            improvement_pct = ((original_complexity["score"] - optimized_complexity["score"]) / original_complexity["score"]) * 100
+        else:
+            improvement_pct = 0
+
+        # Determine improvements made
+        improvements = []
+        if original_complexity["operations"]["wildcards"] > optimized_complexity["operations"]["wildcards"]:
+            improvements.append("Replaced SELECT * with specific columns")
+        if original_complexity["operations"]["subqueries"] > optimized_complexity["operations"]["subqueries"]:
+            improvements.append("Reduced subquery usage")
+        if original_complexity["operations"]["joins"] < optimized_complexity["operations"]["joins"] and original_complexity["operations"]["subqueries"] > optimized_complexity["operations"]["subqueries"]:
+            improvements.append("Converted subqueries to JOINs")
+        if "No WHERE clause" in original_complexity["issues"] and "No WHERE clause" not in optimized_complexity["issues"]:
+            improvements.append("Added WHERE clause")
+        if len(original_complexity["issues"]) > len(optimized_complexity["issues"]):
+            improvements.append(f"Reduced issues from {len(original_complexity['issues'])} to {len(optimized_complexity['issues'])}")
+
+        if not improvements:
+            improvements.append("Query structure refined for better clarity")
+
+        return {
+            "original": query,
+            "optimized": optimized_query,
+            "improvements": improvements,
+            "original_complexity": original_complexity,
+            "optimized_complexity": optimized_complexity,
+            "estimated_improvement": improvement_pct
+        }
+
+    except Exception as e:
+        print(f"Error optimizing SQL: {e}")
+        return {
+            "original": query,
+            "optimized": query,
+            "improvements": ["Error occurred during optimization"],
+            "original_complexity": original_complexity,
+            "optimized_complexity": original_complexity,
+            "estimated_improvement": 0
+        }
+
+
+def optimize(code: str) -> str:
+    """
+    Optimize code, SQL queries, or regex patterns.
+
+    Args:
+        code: The code, SQL query, or regex pattern to optimize
 
     Returns:
         Optimized version
     """
-    # Detect if input is a regex pattern
-    is_regex = _is_regex_pattern(code)
+    # Detect input type: SQL, regex, or Python code
+    is_sql = _is_sql_query(code)
+    is_regex = _is_regex_pattern(code) if not is_sql else False
 
-    if is_regex:
-        prompt = f"""Optimize this:
+    if is_sql:
+        # Use dedicated SQL optimizer
+        result = optimize_sql(code)
+        return result["optimized"]
+    elif is_regex:
+        prompt = f"""Optimize this regex pattern:
 
 {code}
 
-Return only the optimized version, nothing else."""
+Return only the optimized pattern, nothing else."""
     else:
-        prompt = f"""Optimize this:
+        prompt = f"""Optimize this Python code:
 
 ```python
 {code}
@@ -277,6 +623,8 @@ Return only the optimized code, nothing else."""
         # Remove language identifier if present
         if optimized.startswith("python\n"):
             optimized = optimized[7:]
+        elif optimized.startswith("sql\n"):
+            optimized = optimized[4:]
 
         # Remove quotes from regex patterns
         if is_regex:
@@ -448,423 +796,3 @@ def benchmark_regex(
     }
 
     return stats, match_results
-
-
-# Example functions to benchmark (INTENTIONALLY SLOW)
-def slow_nested_loops(n: int = 100):
-    """SLOW: Using nested loops instead of list comprehension."""
-    result = []
-    for i in range(n):
-        temp = i * i
-        result.append(temp)
-    # Simulate more inefficiency
-    final = []
-    for item in result:
-        final.append(item)
-    return final
-
-
-def slow_string_concat(n: int = 500):
-    """SLOW: String concatenation with + operator."""
-    result = ""
-    for i in range(n):
-        result = result + str(i) + ","
-    return result
-
-
-def slow_list_search(n: int = 1000):
-    """SLOW: Searching in list repeatedly (O(n) each time)."""
-    data = list(range(n))
-    found = []
-    search_terms = list(range(0, n, 10))
-    for term in search_terms:
-        if term in data:  # O(n) operation
-            found.append(term)
-    return found
-
-
-def slow_dict_building(n: int = 1000):
-    """SLOW: Building dict inefficiently."""
-    result = {}
-    for i in range(n):
-        key = str(i)
-        value = i * 2
-        result[key] = value
-    # Rebuild it for no reason
-    final = {}
-    for k in result.keys():
-        final[k] = result[k]
-    return final
-
-
-def slow_filtering(n: int = 1000):
-    """SLOW: Filtering with nested loops."""
-    numbers = list(range(n))
-    result = []
-    for num in numbers:
-        if num % 2 == 0:
-            if num % 3 == 0:
-                result.append(num)
-    return result
-
-
-def slow_sum_calculation(n: int = 1000):
-    """SLOW: Summing inefficiently."""
-    numbers = []
-    for i in range(n):
-        numbers.append(i)
-
-    total = 0
-    for num in numbers:
-        total = total + num
-    return total
-
-
-def slow_unique_values(n: int = 500):
-    """SLOW: Finding unique values using list."""
-    data = [i % 50 for i in range(n)]  # Creates duplicates
-    unique = []
-    for item in data:
-        if item not in unique:  # O(n) check each time
-            unique.append(item)
-    return unique
-
-
-def slow_matrix_multiply(size: int = 50):
-    """SLOW: Matrix multiplication with pure Python loops."""
-    # Create two matrices
-    a = []
-    for i in range(size):
-        row = []
-        for j in range(size):
-            row.append(i + j)
-        a.append(row)
-
-    b = []
-    for i in range(size):
-        row = []
-        for j in range(size):
-            row.append(i * j)
-        b.append(row)
-
-    # Multiply matrices (slow way)
-    result = []
-    for i in range(size):
-        row = []
-        for j in range(size):
-            total = 0
-            for k in range(size):
-                total = total + a[i][k] * b[k][j]
-            row.append(total)
-        result.append(row)
-
-    return result
-
-
-# Slow regex patterns
-SLOW_REGEX_PATTERNS = [
-    r"(a+)+b",
-    r".*.*.*expensive",
-    r"(\w+\s+)*\w+",
-    r"([\w])+@([\w])+\.([\w])+",
-    r"(\d{1}|\d{2}|\d{3})",
-]
-
-
-def run_function_optimization(func, kwargs, number, repeat):
-    """Run optimization workflow for a single function."""
-    print("\n" + "="*80)
-    print(f"OPTIMIZING: {func.__name__}")
-    print("="*80)
-
-    # Get source code of slow function
-    slow_source = inspect.getsource(func)
-
-    print("\n[ORIGINAL SLOW CODE]")
-    print("-" * 80)
-    print(slow_source)
-    print("-" * 80)
-
-    # Benchmark slow version
-    print("\n[BENCHMARKING SLOW VERSION...]")
-    slow_results = benchmark_code(func, number=number, repeat=repeat, auto_generate_defaults=False, **kwargs)
-    print_benchmark_results(f"{func.__name__} (SLOW)", slow_results)
-
-    # Generate optimized code
-    print("\n[GENERATING OPTIMIZED CODE...]")
-    optimized_source = optimize(slow_source)
-
-    print("\n[OPTIMIZED CODE]")
-    print("-" * 80)
-    print(optimized_source)
-    print("-" * 80)
-
-    # Execute the optimized code to create the function
-    try:
-        local_scope = {}
-        exec(optimized_source, globals(), local_scope)
-        optimized_func_name = func.__name__
-        optimized_func = local_scope[optimized_func_name]
-
-        # Benchmark optimized version
-        print("\n[BENCHMARKING OPTIMIZED VERSION...]")
-        optimized_results = benchmark_code(
-            optimized_func,
-            number=number,
-            repeat=repeat,
-            auto_generate_defaults=False,
-            **kwargs
-        )
-        print_benchmark_results(f"{func.__name__} (OPTIMIZED)", optimized_results)
-
-        # Calculate speedup
-        speedup = slow_results['mean'] / optimized_results['mean']
-        time_saved = slow_results['mean'] - optimized_results['mean']
-
-        print("\n" + "🚀" * 40)
-        print(f"PERFORMANCE IMPROVEMENT")
-        print("🚀" * 40)
-        print(f"Original time:   {slow_results['mean']:.6f} seconds")
-        print(f"Optimized time:  {optimized_results['mean']:.6f} seconds")
-        print(f"Time saved:      {time_saved:.6f} seconds ({time_saved/slow_results['mean']*100:.1f}%)")
-        print(f"Speedup:         {speedup:.2f}x faster")
-        print("🚀" * 40)
-
-    except Exception as e:
-        print(f"\n❌ Error executing optimized code: {e}")
-        print("Skipping benchmark for optimized version...")
-
-
-def run_function_benchmark(func, kwargs, number, repeat, name):
-    """Run benchmark only (no optimization) for a function."""
-    print(f"\n### {name} ###")
-    results = benchmark_code(func, number=number, repeat=repeat, auto_generate_defaults=False, **kwargs)
-    print_benchmark_results(name, results)
-
-
-def run_regex_optimization(slow_pattern):
-    """Run optimization workflow for a single regex pattern."""
-    print("\n" + "="*80)
-    print("OPTIMIZING REGEX")
-    print("="*80)
-
-    print("\n[ORIGINAL PATTERN]")
-    print(f"Pattern: {slow_pattern}")
-
-    # Generate test cases: 25 positive, 25 negative
-    print("\n[GENERATING TEST CASES...]")
-    positive_cases, negative_cases = generate_regex_test_cases(slow_pattern, num_positive=25, num_negative=25)
-    test_data = positive_cases + negative_cases
-
-    print(f"Generated {len(positive_cases)} positive cases (should match)")
-    print(f"Generated {len(negative_cases)} negative cases (should NOT match)")
-    print(f"Sample positive: {positive_cases[:3]}...")
-    print(f"Sample negative: {negative_cases[:3]}...")
-
-    # Benchmark slow pattern
-    print("\n[BENCHMARKING ORIGINAL PATTERN...]")
-    try:
-        slow_stats, slow_results = benchmark_regex(slow_pattern, test_data, number=100, repeat=5)
-        print_benchmark_results(f"Regex: {slow_pattern}", slow_stats)
-
-        # Count matches for positive and negative cases
-        slow_positive_matches = sum(slow_results[:len(positive_cases)])
-        slow_negative_matches = sum(slow_results[len(positive_cases):])
-
-        print(f"\nOriginal Pattern Results:")
-        print(f"  Positive cases: {slow_positive_matches}/{len(positive_cases)} matched")
-        print(f"  Negative cases: {slow_negative_matches}/{len(negative_cases)} matched (should be 0)")
-
-        # Optimize pattern
-        print("\n[OPTIMIZING PATTERN...]")
-        optimized_pattern = optimize(slow_pattern)
-
-        print(f"\n[OPTIMIZED PATTERN]")
-        print(f"Pattern: {optimized_pattern}")
-
-        # Benchmark optimized pattern
-        print("\n[BENCHMARKING OPTIMIZED PATTERN...]")
-        optimized_stats, optimized_results = benchmark_regex(optimized_pattern, test_data, number=100, repeat=5)
-        print_benchmark_results(f"Regex: {optimized_pattern}", optimized_stats)
-
-        # Count matches for positive and negative cases
-        opt_positive_matches = sum(optimized_results[:len(positive_cases)])
-        opt_negative_matches = sum(optimized_results[len(positive_cases):])
-
-        print(f"\nOptimized Pattern Results:")
-        print(f"  Positive cases: {opt_positive_matches}/{len(positive_cases)} matched")
-        print(f"  Negative cases: {opt_negative_matches}/{len(negative_cases)} matched (should be 0)")
-
-        # Validate results match
-        print("\n" + "="*80)
-        print("VALIDATION")
-        print("="*80)
-
-        if slow_results == optimized_results:
-            print("✅ PERFECT MATCH: Both patterns produce identical results on all test cases")
-        else:
-            print("⚠️  WARNING: Patterns produce different results!")
-            diff_count = sum(1 for a, b in zip(slow_results, optimized_results) if a != b)
-            print(f"   Total differences: {diff_count}/{len(test_data)} strings")
-
-            # Show differences in detail
-            positive_diffs = sum(1 for i in range(len(positive_cases)) if slow_results[i] != optimized_results[i])
-            negative_diffs = sum(1 for i in range(len(positive_cases), len(test_data)) if slow_results[i] != optimized_results[i])
-
-            if positive_diffs > 0:
-                print(f"   Positive cases with differences: {positive_diffs}/{len(positive_cases)}")
-            if negative_diffs > 0:
-                print(f"   Negative cases with differences: {negative_diffs}/{len(negative_cases)}")
-
-        # Calculate speedup
-        speedup = slow_stats['mean'] / optimized_stats['mean']
-        time_saved = slow_stats['mean'] - optimized_stats['mean']
-
-        print("\n" + "⚡" * 40)
-        print("REGEX PERFORMANCE IMPROVEMENT")
-        print("⚡" * 40)
-        print(f"Original time:   {slow_stats['mean']:.6f} seconds")
-        print(f"Optimized time:  {optimized_stats['mean']:.6f} seconds")
-        print(f"Time saved:      {time_saved:.6f} seconds ({time_saved/slow_stats['mean']*100:.1f}%)")
-        print(f"Speedup:         {speedup:.2f}x faster")
-        print("⚡" * 40)
-
-    except Exception as e:
-        print(f"\n❌ Error processing regex: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("AI-POWERED CODE OPTIMIZATION TOOL")
-    print("="*60)
-
-    # Define all available examples
-    function_optimizations = {
-        "slow_nested_loops": (slow_nested_loops, {"n": 100}, 1000, 5),
-        "slow_string_concat": (slow_string_concat, {"n": 500}, 100, 5),
-        "slow_list_search": (slow_list_search, {"n": 1000}, 100, 5),
-        "slow_filtering": (slow_filtering, {"n": 1000}, 1000, 5),
-    }
-
-    function_benchmarks = {
-        "slow_sum_calculation": (slow_sum_calculation, {"n": 1000}, 1000, 5, "Slow Sum Calculation"),
-        "slow_unique_values": (slow_unique_values, {"n": 500}, 100, 5, "Slow Unique Values"),
-        "slow_dict_building": (slow_dict_building, {"n": 1000}, 1000, 5, "Slow Dictionary Building"),
-        "slow_matrix_multiply": (slow_matrix_multiply, {"size": 50}, 10, 3, "Slow Matrix Multiplication"),
-    }
-
-    # Create menu choices
-    choices = []
-
-    # Add section header as disabled choice
-    choices.append("──── FUNCTION OPTIMIZATIONS (with AI) ────")
-    for key in function_optimizations.keys():
-        choices.append(f"  Optimize: {key}")
-
-    # Add function benchmarks
-    choices.append("──── FUNCTION BENCHMARKS (benchmark only) ────")
-    for key, (func, kwargs, number, repeat, name) in function_benchmarks.items():
-        choices.append(f"  Benchmark: {key}")
-
-    # Add regex patterns
-    choices.append("──── REGEX OPTIMIZATIONS ────")
-    for i, pattern in enumerate(SLOW_REGEX_PATTERNS):
-        choices.append(f"  Regex: {pattern[:50]}")
-
-    # Add special options
-    choices.append("──── RUN MULTIPLE ────")
-    choices.append("  Run All Function Optimizations")
-    choices.append("  Run All Function Benchmarks")
-    choices.append("  Run All Regex Optimizations")
-    choices.append("  Run Everything")
-    choices.append("────────────────────")
-    choices.append("  Exit")
-
-    # Show menu
-    questions = [
-        InquirerList('choice',
-                     message="Select example to run (use arrow keys)",
-                     choices=choices,
-                     carousel=True)
-    ]
-
-    try:
-        answer = prompt(questions, theme=GreenPassion())
-
-        if not answer or answer['choice'].strip() == 'Exit':
-            print("\nExiting...")
-        else:
-            choice = answer['choice'].strip()
-
-            # Skip if it's a separator/header
-            if choice.startswith('────'):
-                print("\nPlease select an actual option, not a separator.")
-            # Handle function optimizations
-            elif 'Optimize:' in choice:
-                func_name = choice.split('Optimize:')[1].strip()
-                func, kwargs, number, repeat = function_optimizations[func_name]
-                run_function_optimization(func, kwargs, number, repeat)
-
-            # Handle function benchmarks
-            elif 'Benchmark:' in choice:
-                func_name = choice.split('Benchmark:')[1].strip()
-                func, kwargs, number, repeat, name = function_benchmarks[func_name]
-                run_function_benchmark(func, kwargs, number, repeat, name)
-
-            # Handle regex optimizations
-            elif 'Regex:' in choice:
-                pattern_start = choice.split('Regex:')[1].strip()
-                # Find matching regex pattern
-                for pattern in SLOW_REGEX_PATTERNS:
-                    if pattern.startswith(pattern_start):
-                        run_regex_optimization(pattern)
-                        break
-
-            # Handle "run all" options
-            elif 'Run All Function Optimizations' in choice:
-                for func, kwargs, number, repeat in function_optimizations.values():
-                    run_function_optimization(func, kwargs, number, repeat)
-
-            elif 'Run All Function Benchmarks' in choice:
-                print("\n\n" + "="*80)
-                print("ADDITIONAL SLOW CODE EXAMPLES")
-                print("="*80)
-                for func, kwargs, number, repeat, name in function_benchmarks.values():
-                    run_function_benchmark(func, kwargs, number, repeat, name)
-
-            elif 'Run All Regex Optimizations' in choice:
-                print("\n\n" + "="*80)
-                print("REGEX PATTERN OPTIMIZATION")
-                print("="*80)
-                for pattern in SLOW_REGEX_PATTERNS:
-                    run_regex_optimization(pattern)
-
-            elif 'Run Everything' in choice:
-                # Run everything
-                for func, kwargs, number, repeat in function_optimizations.values():
-                    run_function_optimization(func, kwargs, number, repeat)
-
-                print("\n\n" + "="*80)
-                print("ADDITIONAL SLOW CODE EXAMPLES")
-                print("="*80)
-                for func, kwargs, number, repeat, name in function_benchmarks.values():
-                    run_function_benchmark(func, kwargs, number, repeat, name)
-
-                print("\n\n" + "="*80)
-                print("REGEX PATTERN OPTIMIZATION")
-                print("="*80)
-                for pattern in SLOW_REGEX_PATTERNS:
-                    run_regex_optimization(pattern)
-
-            print("\n" + "="*80)
-            print("COMPLETE")
-            print("="*80 + "\n")
-
-    except KeyboardInterrupt:
-        print("\n\nExiting...")
-    except Exception as e:
-        print(f"\nError: {e}")
-        import traceback
-        traceback.print_exc()

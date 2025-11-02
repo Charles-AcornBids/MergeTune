@@ -9,4 +9,5 @@ dependencies = [
     "metorial>=1.0.11",
     "openai>=2.6.1",
     "python-dotenv>=1.2.1",
+    "sqlparse>=0.5.3",
 ]

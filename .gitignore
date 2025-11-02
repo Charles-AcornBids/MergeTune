@@ -31,6 +31,9 @@ ENV/
 .env.local
 .env.*.local
 
+# OAuth cache
+.oauth_cache.json
+
 # IDE
 .vscode/
 .idea/
