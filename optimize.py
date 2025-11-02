@@ -9,9 +9,18 @@ from sqlparse.tokens import Keyword, DML
 from typing import Callable, Any, Dict, List, Tuple, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
+import nivara as nv
 
 # Load environment variables
 load_dotenv()
+
+nv.configure(
+    timeout=2.0,
+    retries=2,
+    mode='background',
+    queue_size=10000,
+    debug=True,
+)
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -81,7 +90,8 @@ For numeric parameters, use small to medium-sized values (e.g., 10-1000).
         # Remove markdown code blocks if present
         if generated_values_str.startswith("```"):
             lines = generated_values_str.split("\n")
-            generated_values_str = "\n".join([line for line in lines if not line.startswith("```")])
+            generated_values_str = "\n".join(
+                [line for line in lines if not line.startswith("```")])
             generated_values_str = generated_values_str.strip()
 
         # Safely evaluate the dictionary
@@ -221,7 +231,8 @@ def _is_regex_pattern(text: str) -> bool:
     stripped = text.strip()
 
     # Python code keywords that indicate it's NOT a regex
-    python_keywords = ['def ', 'class ', 'import ', 'from ', 'return ', 'if ', 'for ', 'while ', 'try:', 'except']
+    python_keywords = ['def ', 'class ', 'import ', 'from ',
+                       'return ', 'if ', 'for ', 'while ', 'try:', 'except']
     if any(keyword in stripped for keyword in python_keywords):
         return False
 
@@ -250,7 +261,8 @@ def _is_sql_query(text: str) -> bool:
     text_upper = text.strip().upper()
 
     # Check for SQL keywords at the start
-    sql_keywords = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'WITH']
+    sql_keywords = ['SELECT', 'INSERT', 'UPDATE',
+                    'DELETE', 'CREATE', 'ALTER', 'DROP', 'WITH']
     if any(text_upper.startswith(keyword) for keyword in sql_keywords):
         return True
 
@@ -400,19 +412,22 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
     join_count = len(re.findall(r'\bJOIN\b', query_upper))
     operations["joins"] = join_count
     if join_count > 3:
-        issues.append(f"Many JOINs ({join_count}) - consider denormalization or restructuring")
+        issues.append(
+            f"Many JOINs ({join_count}) - consider denormalization or restructuring")
 
     # Count subqueries
     subquery_count = query.count('(SELECT') + query.count('( SELECT')
     operations["subqueries"] = subquery_count
     if subquery_count > 2:
-        issues.append(f"Multiple subqueries ({subquery_count}) - consider CTEs or JOINs")
+        issues.append(
+            f"Multiple subqueries ({subquery_count}) - consider CTEs or JOINs")
 
     # Check for OR conditions (can be slow)
     or_count = len(re.findall(r'\bOR\b', query_upper))
     operations["or_conditions"] = or_count
     if or_count > 3:
-        issues.append(f"Many OR conditions ({or_count}) - consider IN clause or UNION")
+        issues.append(
+            f"Many OR conditions ({or_count}) - consider IN clause or UNION")
 
     # Check for functions that might be expensive
     expensive_functions = ['DISTINCT', 'GROUP BY', 'ORDER BY', 'HAVING']
@@ -431,10 +446,12 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
 
     # Check for NOT IN (can be slow)
     if 'NOT IN' in query_upper:
-        issues.append("NOT IN clause - consider LEFT JOIN with NULL check instead")
+        issues.append(
+            "NOT IN clause - consider LEFT JOIN with NULL check instead")
 
     # Count tables (approximate)
-    from_match = re.search(r'FROM\s+([\w\s,]+?)(?:WHERE|JOIN|GROUP|ORDER|LIMIT|;|$)', query, re.IGNORECASE)
+    from_match = re.search(
+        r'FROM\s+([\w\s,]+?)(?:WHERE|JOIN|GROUP|ORDER|LIMIT|;|$)', query, re.IGNORECASE)
     if from_match:
         tables = [t.strip() for t in from_match.group(1).split(',')]
         operations["tables"] = len(tables)
@@ -529,7 +546,8 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
         # Remove markdown code blocks if present
         if optimized_query.startswith("```"):
             lines = optimized_query.split("\n")
-            optimized_query = "\n".join([line for line in lines if not line.startswith("```")])
+            optimized_query = "\n".join(
+                [line for line in lines if not line.startswith("```")])
             optimized_query = optimized_query.strip()
 
         # Remove language identifier if present
@@ -541,7 +559,8 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
 
         # Calculate improvement
         if original_complexity["score"] > 0:
-            improvement_pct = ((original_complexity["score"] - optimized_complexity["score"]) / original_complexity["score"]) * 100
+            improvement_pct = (
+                (original_complexity["score"] - optimized_complexity["score"]) / original_complexity["score"]) * 100
         else:
             improvement_pct = 0
 
@@ -556,7 +575,8 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
         if "No WHERE clause" in original_complexity["issues"] and "No WHERE clause" not in optimized_complexity["issues"]:
             improvements.append("Added WHERE clause")
         if len(original_complexity["issues"]) > len(optimized_complexity["issues"]):
-            improvements.append(f"Reduced issues from {len(original_complexity['issues'])} to {len(optimized_complexity['issues'])}")
+            improvements.append(
+                f"Reduced issues from {len(original_complexity['issues'])} to {len(optimized_complexity['issues'])}")
 
         if not improvements:
             improvements.append("Query structure refined for better clarity")
@@ -583,6 +603,7 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
 
 
 def optimize(code: str, benchmark: bool = True) -> Dict[str, Any]:
+    print("optimize.py called!!")
     """
     Optimize code, SQL queries, or regex patterns.
 
@@ -646,7 +667,8 @@ Return only the optimized pattern, nothing else."""
             # Remove markdown code blocks if present
             if optimized.startswith("```"):
                 lines = optimized.split("\n")
-                optimized = "\n".join([line for line in lines if not line.startswith("```")])
+                optimized = "\n".join(
+                    [line for line in lines if not line.startswith("```")])
                 optimized = optimized.strip()
 
             # Remove quotes from regex patterns
@@ -655,26 +677,35 @@ Return only the optimized pattern, nothing else."""
             # Benchmark if requested
             if benchmark:
                 # Generate test cases
-                positive_cases, negative_cases = generate_regex_test_cases(code, num_positive=25, num_negative=25)
+                positive_cases, negative_cases = generate_regex_test_cases(
+                    code, num_positive=25, num_negative=25)
                 test_data = positive_cases + negative_cases
 
                 # Benchmark original
-                original_stats, original_results = benchmark_regex(code, test_data, number=100, repeat=5)
+                original_stats, original_results = benchmark_regex(
+                    code, test_data, number=100, repeat=5)
 
                 # Benchmark optimized
-                optimized_stats, optimized_results = benchmark_regex(optimized, test_data, number=100, repeat=5)
+                optimized_stats, optimized_results = benchmark_regex(
+                    optimized, test_data, number=100, repeat=5)
 
                 # Calculate speedup
-                speedup = original_stats['mean'] / optimized_stats['mean'] if optimized_stats['mean'] > 0 else 0
+                speedup = original_stats['mean'] / \
+                    optimized_stats['mean'] if optimized_stats['mean'] > 0 else 0
 
                 # Validate results match
                 results_match = original_results == optimized_results
-                diff_count = sum(1 for a, b in zip(original_results, optimized_results) if a != b)
+                diff_count = sum(1 for a, b in zip(
+                    original_results, optimized_results) if a != b)
 
-                original_positive_matches = sum(original_results[:len(positive_cases)])
-                original_negative_matches = sum(original_results[len(positive_cases):])
-                optimized_positive_matches = sum(optimized_results[:len(positive_cases)])
-                optimized_negative_matches = sum(optimized_results[len(positive_cases):])
+                original_positive_matches = sum(
+                    original_results[:len(positive_cases)])
+                original_negative_matches = sum(
+                    original_results[len(positive_cases):])
+                optimized_positive_matches = sum(
+                    optimized_results[:len(positive_cases)])
+                optimized_negative_matches = sum(
+                    optimized_results[len(positive_cases):])
 
                 return {
                     "type": "regex",
@@ -747,7 +778,8 @@ Return only the optimized code, nothing else."""
             # Remove markdown code blocks if present
             if optimized.startswith("```"):
                 lines = optimized.split("\n")
-                optimized = "\n".join([line for line in lines if not line.startswith("```")])
+                optimized = "\n".join(
+                    [line for line in lines if not line.startswith("```")])
                 optimized = optimized.strip()
 
             # Remove language identifier if present
@@ -811,7 +843,8 @@ Return only a Python list of strings."""
         # Remove markdown code blocks if present
         if test_data_str.startswith("```"):
             lines = test_data_str.split("\n")
-            test_data_str = "\n".join([line for line in lines if not line.startswith("```")])
+            test_data_str = "\n".join(
+                [line for line in lines if not line.startswith("```")])
             test_data_str = test_data_str.strip()
 
         # Remove 'python' language identifier if present
@@ -868,7 +901,8 @@ Make the test cases realistic and diverse."""
         # Remove markdown code blocks if present
         if test_data_str.startswith("```"):
             lines = test_data_str.split("\n")
-            test_data_str = "\n".join([line for line in lines if not line.startswith("```")])
+            test_data_str = "\n".join(
+                [line for line in lines if not line.startswith("```")])
             test_data_str = test_data_str.strip()
 
         # Remove 'python' language identifier if present
@@ -885,8 +919,6 @@ Make the test cases realistic and diverse."""
             [f"match{i}" for i in range(num_positive)],
             [f"nomatch{i}" for i in range(num_negative)]
         )
-
-
 
 
 def benchmark_regex(

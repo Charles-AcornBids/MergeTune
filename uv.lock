@@ -1161,6 +1161,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "inquirer" },
     { name = "metorial" },
+    { name = "nivara" },
     { name = "openai" },
     { name = "python-dotenv" },
     { name = "sqlparse" },
@@ -1170,6 +1171,7 @@ dependencies = [
 requires-dist = [
     { name = "inquirer", specifier = ">=3.4.1" },
     { name = "metorial", specifier = ">=1.0.11" },
+    { name = "nivara", specifier = ">=0.2.4" },
     { name = "openai", specifier = ">=2.6.1" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "sqlparse", specifier = ">=0.5.3" },
@@ -1537,6 +1539,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/8f/0a60e501584145588be1af5cc829265701ba3c35a64aec8e07cbb71d39bb/multidict-6.7.0-cp314-cp314t-win_amd64.whl", hash = "sha256:09929cab6fcb68122776d575e03c6cc64ee0b8fca48d17e135474b042ce515cd", size = 53507 },
     { url = "https://files.pythonhosted.org/packages/7f/ae/3148b988a9c6239903e786eac19c889fab607c31d6efa7fb2147e5680f23/multidict-6.7.0-cp314-cp314t-win_arm64.whl", hash = "sha256:cc41db090ed742f32bd2d2c721861725e6109681eddf835d0a82bd3a5c382827", size = 44804 },
     { url = "https://files.pythonhosted.org/packages/b7/da/7d22601b625e241d4f23ef1ebff8acfc60da633c9e7e7922e24d10f592b3/multidict-6.7.0-py3-none-any.whl", hash = "sha256:394fc5c42a333c9ffc3e421a4c85e08580d990e08b99f6bf35b4132114c5dcb3", size = 12317 },
+]
+
+[[package]]
+name = "nivara"
+version = "0.2.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8f/a0/1ea5460540323dbd544e371e9c9053b47840d69dbfd20dac0e5d7a7a20bd/nivara-0.2.4.tar.gz", hash = "sha256:d495a18b2c421fbab798724a16298b84a3fd4a854f2543e71e553cb8e34aabd6", size = 7043 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1b/c2/26196961a1f533747ed93eb7ecdba8cf62aef9a4a79098ac46f08ca04346/nivara-0.2.4-py3-none-any.whl", hash = "sha256:50d208f1cce5fe9073baefc4aff6e0d94516c889eb5220f844c541d87ed6024e", size = 7358 },
 ]
 
 [[package]]

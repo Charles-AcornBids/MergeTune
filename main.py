@@ -9,6 +9,7 @@ import ast
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any
+import nivara as nv
 
 from openai import AsyncOpenAI
 from metorial import Metorial, MetorialOpenAI, MetorialAPIError
@@ -18,6 +19,14 @@ from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
+
+nv.configure(
+    timeout=2.0,
+    retries=2,
+    mode='background',
+    queue_size=10000,
+    debug=True,
+)
 
 # OAuth cache file path
 OAUTH_CACHE_FILE = Path(".oauth_cache.json")
@@ -488,19 +497,31 @@ After getting the list, tell me the number of the most recent open pull request.
     print(f"\n📂 Fetching Python files changed in PR #{pr_number}...")
 
     messages = [
-        {"role": "user", "content": f"""Use the appropriate tool to get all files changed in pull request #{pr_number} for repository {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}.
+        {"role": "user", "content": f"""Use the appropriate tools to get all Python files changed in pull request #{pr_number} for repository {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}.
 
-IMPORTANT: Call the tool to list files in the pull request, then for each Python (.py) file, get its full content FROM THE PR'S HEAD BRANCH (the branch with the changes), NOT from the default branch.
+CRITICAL INSTRUCTIONS:
+1. First, use the tool to list all files changed in PR #{pr_number}
+2. Get the PR's head branch/ref information (the branch with the changes)
+3. For EACH Python (.py) file, use the tool to get its FULL RAW CONTENT from the PR's HEAD BRANCH (not the base branch)
+4. YOU MUST include the complete file contents in your final response
 
-Steps:
-1. List all files changed in PR #{pr_number}
-2. Get the PR's head branch/ref information
-3. For each file that ends with .py, get its full raw content FROM THE PR'S HEAD BRANCH
-4. Return the filenames and contents
+RESPONSE FORMAT:
+After fetching all files, respond with a JSON array like this:
+[
+  {{
+    "filename": "path/to/file.py",
+    "content": "the complete raw file content here - EVERY LINE of code"
+  }},
+  ...
+]
 
-CRITICAL: You MUST fetch file contents from the pull request's source/head branch, not the base/default branch. Use the PR's head ref when fetching file contents.
+CRITICAL REQUIREMENTS:
+- Fetch contents from the PR's HEAD/SOURCE branch, NOT the base branch
+- Include the ENTIRE file content, not summaries
+- Only include Python (.py) files
+- The "content" field must have the COMPLETE file contents verbatim
 
-Focus only on Python (.py) files."""}
+Do not summarize or truncate file contents. Include every line of code."""}
     ]
 
     py_files = {}
@@ -518,29 +539,56 @@ Focus only on Python (.py) files."""}
 
         if not tool_calls:
             content = choice.message.content
-            print(f"   Response: {content}")
+            print(f"   Response: {content[:200]}...")  # Show truncated preview
 
-            # Try to extract file content from the agent's summary message
-            # Look for pattern like "Filename: X\nContent:\n[code]"
-            filename_pattern = r'Filename:\s+(\S+\.py)\s+Content:\s*\n(.*?)(?=\n\nFilename:|$)'
-            matches = re.finditer(filename_pattern, content, re.DOTALL)
+            # Try to parse as JSON array (our requested format)
+            try:
+                # Remove markdown code blocks if present
+                json_content = content
+                if "```json" in json_content or "```" in json_content:
+                    # Extract content between code blocks
+                    json_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', json_content, re.DOTALL)
+                    if json_match:
+                        json_content = json_match.group(1)
 
-            for match in matches:
-                filename = match.group(1)
-                file_content = match.group(2).strip()
-                if file_content:
-                    py_files[filename] = file_content
-                    print(f"   ✅ Extracted content for {filename} from summary")
-                    files_found = True
+                # Try to parse as JSON
+                files_data = json.loads(json_content)
+
+                if isinstance(files_data, list):
+                    for file_info in files_data:
+                        if isinstance(file_info, dict):
+                            filename = file_info.get('filename', '')
+                            file_content = file_info.get('content', '')
+                            if filename and filename.endswith('.py') and file_content:
+                                py_files[filename] = file_content
+                                print(f"   ✅ Extracted {filename} ({len(file_content)} bytes)")
+                                files_found = True
+
+                    if files_found:
+                        print(f"   ✅ Successfully parsed {len(py_files)} file(s) from JSON response")
+                        break
+            except (json.JSONDecodeError, ValueError) as e:
+                # Not valid JSON, try fallback patterns
+                print(f"   ⚠️  JSON parse failed: {e}, trying fallback extraction...")
+
+                # Fallback: Look for pattern like "Filename: X\nContent:\n[code]"
+                filename_pattern = r'Filename:\s+(\S+\.py)\s+Content:\s*\n(.*?)(?=\n\nFilename:|$)'
+                matches = re.finditer(filename_pattern, content, re.DOTALL)
+
+                for match in matches:
+                    filename = match.group(1)
+                    file_content = match.group(2).strip()
+                    if file_content:
+                        py_files[filename] = file_content
+                        print(f"   ✅ Extracted content for {filename} from text pattern")
+                        files_found = True
 
             # Check if it says no Python files
             if "no python" in content.lower() or "no .py" in content.lower():
-                # Only set files_found to False if we haven't found any files yet
                 if not py_files:
                     print("   ℹ️  No Python files found in PR")
                     files_found = False
             elif py_files:
-                # If we already have files, we're done
                 files_found = True
             break
 
@@ -554,7 +602,7 @@ Focus only on Python (.py) files."""}
         })
         messages.extend(tool_responses)
 
-        # Try to extract Python file contents
+        # Try to extract Python file contents from tool responses
         for resp in tool_responses:
             if resp.get('role') == 'tool':
                 content = resp.get('content', '')
@@ -570,25 +618,33 @@ Focus only on Python (.py) files."""}
                                 filename = file_info.get(
                                     'filename', file_info.get('path', ''))
                                 if filename.endswith('.py'):
-                                    # Check if we have content
-                                    file_content = file_info.get(
-                                        'content', file_info.get('raw_content', ''))
+                                    # Check if we have content in various possible fields
+                                    file_content = file_info.get('content') or \
+                                                   file_info.get('raw_content') or \
+                                                   file_info.get('data') or \
+                                                   file_info.get('text') or ''
                                     if file_content:
                                         py_files[filename] = file_content
-                                        print(
-                                            f"   ✅ Got content for {filename}")
+                                        print(f"   ✅ Got content for {filename} ({len(file_content)} bytes)")
                                         files_found = True
+                                    else:
+                                        print(f"   ⚠️  Found {filename} but no content field")
 
                     # Handle single file
                     elif isinstance(data, dict):
                         filename = data.get('filename', data.get('path', ''))
                         if filename and filename.endswith('.py'):
-                            file_content = data.get(
-                                'content', data.get('raw_content', ''))
+                            # Check multiple possible content fields
+                            file_content = data.get('content') or \
+                                           data.get('raw_content') or \
+                                           data.get('data') or \
+                                           data.get('text') or ''
                             if file_content:
                                 py_files[filename] = file_content
-                                print(f"   ✅ Got content for {filename}")
+                                print(f"   ✅ Got content for {filename} ({len(file_content)} bytes)")
                                 files_found = True
+                            else:
+                                print(f"   ⚠️  Found {filename} but no content field")
 
                 except json.JSONDecodeError:
                     # Not JSON, might be raw file content
@@ -659,6 +715,15 @@ Focus only on Python (.py) files."""}
                             result = optimize(
                                 speedup['code_snippet'], benchmark=False)
 
+                            # DEBUG: Print the result to see what optimize() returned
+                            print(f"\n          DEBUG - Optimize result:")
+                            print(f"          Type: {result.get('type')}")
+                            print(f"          Original: {result.get('original')[:100]}..." if len(result.get('original', '')) > 100 else f"          Original: {result.get('original')}")
+                            print(f"          Optimized: {result.get('optimized')[:100]}..." if len(result.get('optimized', '')) > 100 else f"          Optimized: {result.get('optimized')}")
+                            print(f"          Improvements: {result.get('improvements')}")
+                            print(f"          Speedup: {result.get('speedup')}")
+                            print(f"          Validation: {result.get('validation')}\n")
+
                             # Add the speedup as a separate suggestion
                             if result['optimized'] != result['original']:
                                 all_optimizations.append({
@@ -680,6 +745,12 @@ Focus only on Python (.py) files."""}
                     print(f"    Optimizing {segment['description']}...")
                     result = optimize(segment['code'], benchmark=False)
 
+                    # DEBUG: Print the result
+                    print(f"\n      DEBUG - SQL Optimize result:")
+                    print(f"      Type: {result.get('type')}")
+                    print(f"      Improvements: {result.get('improvements')}")
+                    print(f"      Validation: {result.get('validation')}\n")
+
                     if result['optimized'] != result['original']:
                         all_optimizations.append({
                             'location': segment['location'],
@@ -692,9 +763,18 @@ Focus only on Python (.py) files."""}
                         print("      ℹ️  No optimization needed")
 
                 elif segment['type'] == 'regex':
-                    # For regex, optimize the pattern
+                    # For regex, optimize the pattern WITH benchmarking to get performance data
                     print(f"    Optimizing {segment['description']}...")
-                    result = optimize(segment['code'], benchmark=False)
+                    result = optimize(segment['code'], benchmark=True)
+
+                    # DEBUG: Print the result
+                    print(f"\n      DEBUG - Regex Optimize result:")
+                    print(f"      Type: {result.get('type')}")
+                    print(f"      Original: {result.get('original')}")
+                    print(f"      Optimized: {result.get('optimized')}")
+                    print(f"      Speedup: {result.get('speedup')}")
+                    print(f"      Improvements: {result.get('improvements')}")
+                    print(f"      Validation: {result.get('validation')}\n")
 
                     if result['optimized'] != result['original']:
                         all_optimizations.append({
@@ -725,7 +805,7 @@ IMPORTANT: Call the appropriate tool with:
 - owner: {GITHUB_REPO_OWNER}
 - repo: {GITHUB_REPO_NAME}
 - pull_request_number or issue_number: {pr_number}
-- body: (the comment text below)
+- body: (the exact comment text below - DO NOT modify or add any additional content)
 
 Comment body to post:
 {comment_body}"""}
