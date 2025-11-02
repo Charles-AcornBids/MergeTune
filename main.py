@@ -192,6 +192,12 @@ If there are no significant optimization opportunities, return an empty array: [
             speedup['line_end'] = start_line + relative_end - 1
             speedup['location'] = f"{file_path}:{speedup['line_start']}-{speedup['line_end']}"
 
+            # Remove literal \n from suggestion text
+            if 'suggestion' in speedup and speedup['suggestion']:
+                speedup['suggestion'] = speedup['suggestion'].replace('\\n', '')
+            if 'issue' in speedup and speedup['issue']:
+                speedup['issue'] = speedup['issue'].replace('\\n', '')
+
             # Debug output
             print(
                 f"      Line number mapping: relative {relative_start}-{relative_end} -> absolute {speedup['line_start']}-{speedup['line_end']}")
@@ -419,17 +425,20 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
 
     # Build the comment body with GitHub code suggestion syntax
     comment = f"**🚀 MergeTune Optimization Suggestion**\n\n"
-    comment += f"**Issue:** {description}\n\n"
+    clean_description = description.replace('\\n', '')
+    comment += f"**Issue:** {clean_description}\n\n"
 
     # Add type-specific details
     if opt_type == 'speedup':
         if opt.get('suggestion'):
-            comment += f"**Suggestion:** {opt['suggestion']}\n\n"
+            clean_suggestion = opt['suggestion'].replace('\\n', '')
+            comment += f"**Suggestion:** {clean_suggestion}\n\n"
 
         if result.get('improvements'):
             comment += "**Improvements:**\n\n"
             for imp in result['improvements']:
-                comment += f"- {imp}\n"
+                clean_imp = imp.replace('\\n', '')
+                comment += f"- {clean_imp}\n"
             comment += "\n"
 
         # Add the code suggestion
@@ -448,7 +457,8 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
         if result.get('improvements'):
             comment += "**Improvements:**\n\n"
             for imp in result['improvements']:
-                comment += f"- {imp}\n"
+                clean_imp = imp.replace('\\n', '')
+                comment += f"- {clean_imp}\n"
             comment += "\n"
 
         # For SQL, reconstruct the full line(s) with the optimized SQL query
@@ -480,7 +490,8 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
         if result.get('improvements'):
             comment += "**Improvements:**\n"
             for imp in result['improvements']:
-                comment += f"- {imp}\n"
+                clean_imp = imp.replace('\\n', '')
+                comment += f"- {clean_imp}\n"
             comment += "\n"
 
         # For regex, reconstruct the full line with the optimized pattern
@@ -509,7 +520,8 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
         if result.get('improvements'):
             comment += "**Improvements:**\n\n"
             for imp in result['improvements']:
-                comment += f"- {imp}\n"
+                clean_imp = imp.replace('\\n', '')
+                comment += f"- {clean_imp}\n"
             comment += "\n"
 
         # Add the code suggestion
