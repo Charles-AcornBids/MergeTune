@@ -28,7 +28,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def generate_default_values(code_func: Callable, **existing_kwargs) -> Dict[str, Any]:
     """
-    Generate default values for function parameters that don't have them using GPT-4o-mini.
+    Generate default values for function parameters that don't have them using gpt-5-mini.
 
     Args:
         code_func: The function to analyze
@@ -37,7 +37,8 @@ def generate_default_values(code_func: Callable, **existing_kwargs) -> Dict[str,
     Returns:
         Dictionary of parameter names to generated default values
     """
-    print(f"[Progress] Analyzing function parameters for {code_func.__name__}...")
+    print(
+        f"[Progress] Analyzing function parameters for {code_func.__name__}...")
     sig = inspect.signature(code_func)
     missing_params = []
 
@@ -55,14 +56,15 @@ def generate_default_values(code_func: Callable, **existing_kwargs) -> Dict[str,
         print("[Progress] No missing parameters - using existing kwargs")
         return existing_kwargs
 
-    print(f"[Progress] Found {len(missing_params)} missing parameters, calling AI to generate defaults...")
+    print(
+        f"[Progress] Found {len(missing_params)} missing parameters, calling AI to generate defaults...")
     # Get function source code for context
     try:
         func_source = inspect.getsource(code_func)
     except (OSError, TypeError):
         func_source = f"Function name: {code_func.__name__}"
 
-    # Create prompt for GPT-4o-mini
+    # Create prompt for gpt-5-mini
     prompt = f"""Given this Python function:
 
 {func_source}
@@ -78,15 +80,14 @@ For numeric parameters, use small to medium-sized values (e.g., 10-1000).
 """
 
     try:
-        print("[Progress] Calling GPT-4o-mini to generate default values...")
+        print("[Progress] Calling gpt-5-mini to generate default values...")
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that generates Python default values. Return only valid Python dictionary syntax, no markdown formatting."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
-            max_tokens=500
+            max_completion_tokens=500
         )
 
         print("[Progress] AI response received, parsing values...")
@@ -299,6 +300,9 @@ def _extract_sql_from_code(code: str) -> List[Tuple[str, int, int]]:
     """
     sql_queries = []
 
+    # Normalize line endings to handle cross-platform differences
+    code = code.replace('\r\n', '\n').replace('\r', '\n')
+
     # Pattern to find SQL in strings (both single and triple quoted)
     # Look for strings that contain SQL keywords
     lines = code.split('\n')
@@ -332,6 +336,7 @@ def _extract_sql_from_code(code: str) -> List[Tuple[str, int, int]]:
                             # Try to extract just the SQL part
                             extracted = _extract_sql_string_content(sql_text)
                             if extracted and _is_sql_query(extracted):
+                                print(f"      DEBUG SQL Detection - Line {start_line}-{i}: {extracted[:80]}...")
                                 sql_queries.append((extracted, start_line, i))
                             current_sql = []
                         break
@@ -342,6 +347,7 @@ def _extract_sql_from_code(code: str) -> List[Tuple[str, int, int]]:
                 sql_text = '\n'.join(current_sql)
                 extracted = _extract_sql_string_content(sql_text)
                 if extracted and _is_sql_query(extracted):
+                    print(f"      DEBUG SQL Detection (multiline) - Line {start_line}-{i}: {extracted[:80]}...")
                     sql_queries.append((extracted, start_line, i))
                 current_sql = []
 
@@ -483,7 +489,8 @@ def analyze_sql_complexity(query: str) -> Dict[str, Any]:
         "estimated_rows_scanned": "unknown" if "WHERE" in query_upper else "all rows"
     }
 
-    print(f"[Progress] SQL complexity analysis complete - Score: {score}, Issues: {len(issues)}")
+    print(
+        f"[Progress] SQL complexity analysis complete - Score: {score}, Issues: {len(issues)}")
     return {
         "score": score,
         "issues": issues if issues else ["No major issues detected"],
@@ -548,8 +555,7 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
                 {"role": "system", "content": "You are a SQL optimization expert. Return only optimized SQL queries without any explanation or formatting."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=2000
+            max_completion_tokens=2000
         )
 
         print("[Progress] AI optimization received, processing response...")
@@ -594,7 +600,8 @@ Return ONLY the optimized SQL query, nothing else. No explanations, no markdown 
         if not improvements:
             improvements.append("Query structure refined for better clarity")
 
-        print(f"[Progress] SQL optimization complete - Estimated improvement: {improvement_pct:.1f}%")
+        print(
+            f"[Progress] SQL optimization complete - Estimated improvement: {improvement_pct:.1f}%")
         return {
             "original": query,
             "optimized": optimized_query,
@@ -672,8 +679,7 @@ Return only the optimized pattern, nothing else."""
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                max_tokens=2000
+                max_completion_tokens=2000
             )
 
             optimized = response.choices[0].message.content.strip()
@@ -783,8 +789,7 @@ Return only the optimized code, nothing else."""
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                max_tokens=2000
+                max_completion_tokens=2000
             )
 
             optimized = response.choices[0].message.content.strip()
@@ -844,12 +849,11 @@ Return only a Python list of strings."""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.8,
-            max_tokens=2000
+            max_completion_tokens=2000
         )
 
         test_data_str = response.choices[0].message.content.strip()
@@ -886,28 +890,45 @@ def generate_regex_test_cases(pattern: str, num_positive: int = 25, num_negative
     Returns:
         Tuple of (positive_cases, negative_cases)
     """
-    prompt = f"""Generate test cases for this regex pattern: {pattern}
+    prompt = f"""Generate comprehensive test cases for this regex pattern: {pattern}
 
-Create TWO separate lists:
-1. {num_positive} strings that SHOULD match the pattern
-2. {num_negative} strings that should NOT match the pattern
+Create TWO separate lists with HIGH-QUALITY, DIVERSE test cases:
 
-Return ONLY a Python tuple of two lists in this exact format:
+1. {num_positive} strings that SHOULD match the pattern:
+   - Include edge cases (minimal matches, maximal matches)
+   - Include typical real-world examples
+   - Test different lengths and formats
+   - Test boundary conditions
+   - Include strings with special characters if relevant
+   - Include variations in whitespace, capitalization (if case-sensitive)
+
+2. {num_negative} strings that should NOT match the pattern:
+   - Include near-misses (strings that are close but don't match)
+   - Include common false positives
+   - Include completely different formats
+   - Include empty strings or minimal variations
+   - Include strings that match part but not all of the pattern
+
+CRITICAL: Ensure the test cases are:
+- Realistic and representative of actual use cases
+- Diverse in length, format, and content
+- Cover edge cases and boundary conditions
+- Test different parts of the regex pattern
+
+Return ONLY a Python tuple of two lists in this exact format (no markdown, no explanation):
 (
     ["positive1", "positive2", ...],
     ["negative1", "negative2", ...]
-)
-
-Make the test cases realistic and diverse."""
+)"""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[
+                {"role": "system", "content": "You are a regex testing expert. Generate comprehensive, realistic test cases that thoroughly validate regex patterns. Return only valid Python tuple syntax, no markdown formatting."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.8,
-            max_tokens=2000
+            max_completion_tokens=3000
         )
 
         test_data_str = response.choices[0].message.content.strip()
@@ -928,11 +949,9 @@ Make the test cases realistic and diverse."""
 
     except Exception as e:
         print(f"Error generating test cases: {e}")
-        # Fallback: generate simple test data
-        return (
-            [f"match{i}" for i in range(num_positive)],
-            [f"nomatch{i}" for i in range(num_negative)]
-        )
+        print(f"  Pattern: {pattern}")
+        # Fallback: generate realistic test data based on the pattern
+        return _generate_fallback_test_cases(pattern, num_positive, num_negative)
 
 
 def benchmark_regex(

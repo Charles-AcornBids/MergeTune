@@ -161,18 +161,17 @@ If there are no significant optimization opportunities, return an empty array: [
                 {"role": "system", "content": "You are a Python performance optimization expert. Return only valid JSON arrays, no markdown formatting."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=2000
+            max_completion_tokens=2000
         )
 
-        result_str = response.choices[0].message.content.strip()
+        result_str = response.choices[0].message.content.rstrip()
 
         # Remove markdown code blocks if present
         if result_str.startswith("```"):
             lines = result_str.split("\n")
             result_str = "\n".join(
                 [line for line in lines if not line.startswith("```")])
-            result_str = result_str.strip()
+            result_str = result_str.rstrip()
 
         # Remove json language identifier if present
         if result_str.startswith("json\n"):
@@ -194,7 +193,8 @@ If there are no significant optimization opportunities, return an empty array: [
             speedup['location'] = f"{file_path}:{speedup['line_start']}-{speedup['line_end']}"
 
             # Debug output
-            print(f"      Line number mapping: relative {relative_start}-{relative_end} -> absolute {speedup['line_start']}-{speedup['line_end']}")
+            print(
+                f"      Line number mapping: relative {relative_start}-{relative_end} -> absolute {speedup['line_start']}-{speedup['line_end']}")
 
         return speedups
 
@@ -231,7 +231,8 @@ def extract_functions_from_code(code: str) -> List[Dict[str, Any]]:
                     'name': node.name,
                     'code': func_code,
                     'line_start': node.lineno,  # 1-indexed, line where function starts
-                    'line_end': end_line_absolute  # 1-indexed, line where function ends (inclusive)
+                    # 1-indexed, line where function ends (inclusive)
+                    'line_end': end_line_absolute
                 })
     except SyntaxError as e:
         print(f"⚠️  Syntax error parsing code: {e}")
@@ -247,13 +248,24 @@ def extract_optimizable_code(file_path: str, content: str) -> List[Dict[str, Any
         List of dicts with 'type', 'code', 'location', 'description'
     """
     optimizable = []
+    # Normalize line endings to handle cross-platform differences
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
     lines = content.split('\n')
 
     # Extract SQL queries
     sql_queries = _extract_sql_from_code(content)
     for sql, start_line, end_line in sql_queries:
+        # Validate line numbers are within bounds
+        if start_line < 1 or end_line > len(lines) or start_line > end_line:
+            print(
+                f"      WARNING: Invalid line numbers for SQL: {start_line}-{end_line}, file has {len(lines)} lines. Skipping.")
+            continue
+
         # Get the full line(s) of code for context (to preserve indentation and variable assignment)
         full_lines = '\n'.join(lines[start_line - 1:end_line])
+
+        print(
+            f"      Found SQL at lines {start_line}-{end_line}: {full_lines[:80]}...")
 
         optimizable.append({
             'type': 'sql',
@@ -261,7 +273,9 @@ def extract_optimizable_code(file_path: str, content: str) -> List[Dict[str, Any
             'location': f"{file_path}:{start_line}-{end_line}",
             'description': f"SQL query at lines {start_line}-{end_line}",
             'full_lines': full_lines.rstrip(),
-            'original_sql': sql
+            'original_sql': sql,
+            'line_start': start_line,
+            'line_end': end_line
         })
 
     # Extract functions (we'll optimize the entire function)
@@ -347,13 +361,13 @@ Return ONLY the complete reconstructed code line(s), nothing else. No explanatio
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[
-                {"role": "system", "content": "You reconstruct code by replacing patterns (SQL, regex, etc.) while preserving all other context including indentation, variable names, and code structure. Return only the code, no explanations."},
+                {"role": "system",
+                    "content": "You reconstruct code by replacing patterns (SQL, regex, etc.) while preserving all other context including indentation, variable names, and code structure. Return only the code, no explanations."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,
-            max_tokens=1000
+            max_completion_tokens=1000
         )
 
         reconstructed = response.choices[0].message.content.rstrip()
@@ -392,21 +406,16 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
     description = opt['description']
     opt_type = opt.get('type', result.get('type', 'unknown'))
 
-    # Parse location (format: "file_path:line_start-line_end" or "file_path:line_num")
-    # Try multi-line format first
-    location_match = re.match(r'([^:]+):(\d+)-(\d+)', location)
-    if location_match:
-        file_path = location_match.group(1)
-        line_start = int(location_match.group(2))
-        line_end = int(location_match.group(3))
-    else:
-        # Try single-line format
-        location_match = re.match(r'([^:]+):(\d+)', location)
-        if not location_match:
-            return None
-        file_path = location_match.group(1)
-        line_start = int(location_match.group(2))
-        line_end = line_start
+    # Use the original line numbers stored in the optimization dict
+    # instead of parsing the location string
+    line_start = opt.get('line_start')
+    line_end = opt.get('line_end', line_start)
+
+    # Extract file path from location string
+    file_path_match = re.match(r'([^:]+):', location)
+    if not file_path_match:
+        return None
+    file_path = file_path_match.group(1)
 
     # Build the comment body with GitHub code suggestion syntax
     comment = f"**🚀 MergeTune Optimization Suggestion**\n\n"
@@ -511,7 +520,8 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
     comment += "\n*Generated by MergeTune - AI-powered code optimization*"
 
     # Debug output
-    print(f"      GitHub suggestion will be posted at {file_path}:{line_start}")
+    print(
+        f"      GitHub suggestion will be posted at {file_path}:{line_start}")
 
     return {
         'path': file_path,
@@ -604,7 +614,7 @@ After getting the list, tell me the number of the most recent open pull request.
                     content = resp.get('content', '')
 
                     # Check for empty list or no PRs
-                    if content.strip() == '[]' or 'no pull requests' in content.lower():
+                    if content.rstrip() == '[]' or 'no pull requests' in content.lower():
                         print("   ℹ️  No open pull requests found in response")
                         pr_found = False
                         break
@@ -701,7 +711,8 @@ Do not summarize or truncate file contents. Include every line of code."""}
                 json_content = content
                 if "```json" in json_content or "```" in json_content:
                     # Extract content between code blocks
-                    json_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', json_content, re.DOTALL)
+                    json_match = re.search(
+                        r'```(?:json)?\s*\n(.*?)\n```', json_content, re.DOTALL)
                     if json_match:
                         json_content = json_match.group(1)
 
@@ -714,16 +725,22 @@ Do not summarize or truncate file contents. Include every line of code."""}
                             filename = file_info.get('filename', '')
                             file_content = file_info.get('content', '')
                             if filename and filename.endswith('.py') and file_content:
+                                # Normalize line endings immediately upon receiving content
+                                file_content = file_content.replace(
+                                    '\r\n', '\n').replace('\r', '\n')
                                 py_files[filename] = file_content
-                                print(f"   ✅ Extracted {filename} ({len(file_content)} bytes)")
+                                print(
+                                    f"   ✅ Extracted {filename} ({len(file_content)} bytes, {len(file_content.split(chr(10)))} lines)")
                                 files_found = True
 
                     if files_found:
-                        print(f"   ✅ Successfully parsed {len(py_files)} file(s) from JSON response")
+                        print(
+                            f"   ✅ Successfully parsed {len(py_files)} file(s) from JSON response")
                         break
             except (json.JSONDecodeError, ValueError) as e:
                 # Not valid JSON, try fallback patterns
-                print(f"   ⚠️  JSON parse failed: {e}, trying fallback extraction...")
+                print(
+                    f"   ⚠️  JSON parse failed: {e}, trying fallback extraction...")
 
                 # Fallback: Look for pattern like "Filename: X\nContent:\n[code]"
                 filename_pattern = r'Filename:\s+(\S+\.py)\s+Content:\s*\n(.*?)(?=\n\nFilename:|$)'
@@ -731,10 +748,11 @@ Do not summarize or truncate file contents. Include every line of code."""}
 
                 for match in matches:
                     filename = match.group(1)
-                    file_content = match.group(2).strip()
+                    file_content = match.group(2).rstrip()
                     if file_content:
                         py_files[filename] = file_content
-                        print(f"   ✅ Extracted content for {filename} from text pattern")
+                        print(
+                            f"   ✅ Extracted content for {filename} from text pattern")
                         files_found = True
 
             # Check if it says no Python files
@@ -774,15 +792,20 @@ Do not summarize or truncate file contents. Include every line of code."""}
                                 if filename.endswith('.py'):
                                     # Check if we have content in various possible fields
                                     file_content = file_info.get('content') or \
-                                                   file_info.get('raw_content') or \
-                                                   file_info.get('data') or \
-                                                   file_info.get('text') or ''
+                                        file_info.get('raw_content') or \
+                                        file_info.get('data') or \
+                                        file_info.get('text') or ''
                                     if file_content:
+                                        # Normalize line endings
+                                        file_content = file_content.replace(
+                                            '\r\n', '\n').replace('\r', '\n')
                                         py_files[filename] = file_content
-                                        print(f"   ✅ Got content for {filename} ({len(file_content)} bytes)")
+                                        print(
+                                            f"   ✅ Got content for {filename} ({len(file_content)} bytes, {len(file_content.split(chr(10)))} lines)")
                                         files_found = True
                                     else:
-                                        print(f"   ⚠️  Found {filename} but no content field")
+                                        print(
+                                            f"   ⚠️  Found {filename} but no content field")
 
                     # Handle single file
                     elif isinstance(data, dict):
@@ -790,15 +813,20 @@ Do not summarize or truncate file contents. Include every line of code."""}
                         if filename and filename.endswith('.py'):
                             # Check multiple possible content fields
                             file_content = data.get('content') or \
-                                           data.get('raw_content') or \
-                                           data.get('data') or \
-                                           data.get('text') or ''
+                                data.get('raw_content') or \
+                                data.get('data') or \
+                                data.get('text') or ''
                             if file_content:
+                                # Normalize line endings
+                                file_content = file_content.replace(
+                                    '\r\n', '\n').replace('\r', '\n')
                                 py_files[filename] = file_content
-                                print(f"   ✅ Got content for {filename} ({len(file_content)} bytes)")
+                                print(
+                                    f"   ✅ Got content for {filename} ({len(file_content)} bytes, {len(file_content.split(chr(10)))} lines)")
                                 files_found = True
                             else:
-                                print(f"   ⚠️  Found {filename} but no content field")
+                                print(
+                                    f"   ⚠️  Found {filename} but no content field")
 
                 except json.JSONDecodeError:
                     # Not JSON, might be raw file content
@@ -815,9 +843,12 @@ Do not summarize or truncate file contents. Include every line of code."""}
                                         path = args.get('path', args.get(
                                             'file', args.get('filename', '')))
                                         if path and path.endswith('.py'):
+                                            # Normalize line endings
+                                            content = content.replace(
+                                                '\r\n', '\n').replace('\r', '\n')
                                             py_files[path] = content
                                             print(
-                                                f"   ✅ Got raw content for {path}")
+                                                f"   ✅ Got raw content for {path} ({len(content.split(chr(10)))} lines)")
                                             files_found = True
                                     except Exception:
                                         pass
@@ -850,7 +881,8 @@ Do not summarize or truncate file contents. Include every line of code."""}
                 if segment['type'] == 'python':
                     # For Python code, identify individual speedup opportunities
                     print(f"    Analyzing {segment['description']}...")
-                    print(f"      Function starts at line {segment.get('line_start', 1)} in file")
+                    print(
+                        f"      Function starts at line {segment.get('line_start', 1)} in file")
 
                     speedups = identify_individual_speedups(
                         segment['code'],
@@ -874,16 +906,23 @@ Do not summarize or truncate file contents. Include every line of code."""}
                             # DEBUG: Print the result to see what optimize() returned
                             print(f"\n          DEBUG - Optimize result:")
                             print(f"          Type: {result.get('type')}")
-                            print(f"          Original: {result.get('original')[:100]}..." if len(result.get('original', '')) > 100 else f"          Original: {result.get('original')}")
-                            print(f"          Optimized: {result.get('optimized')[:100]}..." if len(result.get('optimized', '')) > 100 else f"          Optimized: {result.get('optimized')}")
-                            print(f"          Improvements: {result.get('improvements')}")
-                            print(f"          Speedup: {result.get('speedup')}")
-                            print(f"          Validation: {result.get('validation')}\n")
+                            print(f"          Original: {result.get('original')[:100]}..." if len(result.get(
+                                'original', '')) > 100 else f"          Original: {result.get('original')}")
+                            print(f"          Optimized: {result.get('optimized')[:100]}..." if len(result.get(
+                                'optimized', '')) > 100 else f"          Optimized: {result.get('optimized')}")
+                            print(
+                                f"          Improvements: {result.get('improvements')}")
+                            print(
+                                f"          Speedup: {result.get('speedup')}")
+                            print(
+                                f"          Validation: {result.get('validation')}\n")
 
                             # Add the speedup as a separate suggestion
                             if result['optimized'] != result['original']:
                                 all_optimizations.append({
                                     'location': speedup['location'],
+                                    'line_start': speedup['line_start'],
+                                    'line_end': speedup['line_end'],
                                     'description': speedup['issue'],
                                     'suggestion': speedup['suggestion'],
                                     'result': result,
@@ -908,8 +947,23 @@ Do not summarize or truncate file contents. Include every line of code."""}
                     print(f"      Validation: {result.get('validation')}\n")
 
                     if result['optimized'] != result['original']:
+                        # Parse location to extract line numbers
+                        location_match = re.match(
+                            r'([^:]+):(\d+)-(\d+)', segment['location'])
+                        if location_match:
+                            line_start = int(location_match.group(2))
+                            line_end = int(location_match.group(3))
+                        else:
+                            location_match = re.match(
+                                r'([^:]+):(\d+)', segment['location'])
+                            line_start = int(location_match.group(
+                                2)) if location_match else 1
+                            line_end = line_start
+
                         all_optimizations.append({
                             'location': segment['location'],
+                            'line_start': line_start,
+                            'line_end': line_end,
                             'description': segment['description'],
                             'result': result,
                             'type': 'sql',
@@ -936,8 +990,23 @@ Do not summarize or truncate file contents. Include every line of code."""}
                     print(f"      Validation: {result.get('validation')}\n")
 
                     if result['optimized'] != result['original']:
+                        # Parse location to extract line numbers
+                        location_match = re.match(
+                            r'([^:]+):(\d+)-(\d+)', segment['location'])
+                        if location_match:
+                            line_start = int(location_match.group(2))
+                            line_end = int(location_match.group(3))
+                        else:
+                            location_match = re.match(
+                                r'([^:]+):(\d+)', segment['location'])
+                            line_start = int(location_match.group(
+                                2)) if location_match else 1
+                            line_end = line_start
+
                         all_optimizations.append({
                             'location': segment['location'],
+                            'line_start': line_start,
+                            'line_end': line_end,
                             'description': segment['description'],
                             'result': result,
                             'type': 'regex',
@@ -970,7 +1039,8 @@ Do not summarize or truncate file contents. Include every line of code."""}
         # Post each suggestion as a review comment
         comments_posted = 0
         for i, suggestion in enumerate(suggestions, 1):
-            print(f"\n   Posting suggestion {i}/{len(suggestions)} for {suggestion['path']}:{suggestion['line']}...")
+            print(
+                f"\n   Posting suggestion {i}/{len(suggestions)} for {suggestion['path']}:{suggestion['line']}...")
 
             messages = [
                 {"role": "user", "content": f"""Use the create_review_comment or add_review_comment tool to post a review comment on pull request #{pr_number} in repository {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}.
@@ -1030,7 +1100,8 @@ CRITICAL: The comment MUST be posted on line {suggestion['line']} of file {sugge
                     if resp.get('role') == 'tool':
                         resp_content = resp.get('content', '')
                         if resp_content and ('id' in resp_content or 'created' in resp_content.lower()):
-                            print(f"      ✅ Suggestion {i} posted successfully!")
+                            print(
+                                f"      ✅ Suggestion {i} posted successfully!")
                             comment_posted = True
                             comments_posted += 1
                             break
@@ -1041,7 +1112,8 @@ CRITICAL: The comment MUST be posted on line {suggestion['line']} of file {sugge
             if not comment_posted:
                 print(f"      ⚠️  Could not confirm suggestion {i} was posted")
 
-        print(f"\n✅ Posted {comments_posted}/{len(suggestions)} code suggestion(s) to PR")
+        print(
+            f"\n✅ Posted {comments_posted}/{len(suggestions)} code suggestion(s) to PR")
     else:
         print("\n✨ No optimization opportunities found - code looks great!")
 
