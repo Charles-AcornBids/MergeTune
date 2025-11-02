@@ -257,18 +257,98 @@ def extract_optimizable_code(file_path: str, content: str) -> List[Dict[str, Any
     # Look for potential regex patterns in strings
     # Simple heuristic: find r"..." or r'...' strings
     regex_pattern = r"r['\"]([^'\"]+)['\"]"
+    lines = content.split('\n')
     for match in re.finditer(regex_pattern, content):
         potential_regex = match.group(1)
         if _is_regex_pattern(potential_regex):
-            line_num = content[:match.start()].count('\n') + 1
+            # Debug: Let's see what we're matching and where
+            match_start = match.start()
+            newline_count = content[:match_start].count('\n')
+            line_num = newline_count + 1
+
+            # Get the full line of code for context
+            full_line = lines[line_num - 1] if line_num <= len(lines) else ""
+
+            # Debug output
+            print(f"      DEBUG - Regex detection:")
+            print(f"        Match start position: {match_start}")
+            print(f"        Newlines before match: {newline_count}")
+            print(f"        Calculated line number: {line_num}")
+            print(f"        Full line content: {full_line[:100]}")
+            print(f"        Total lines in file: {len(lines)}")
+
             optimizable.append({
                 'type': 'regex',
                 'code': potential_regex,
                 'location': f"{file_path}:{line_num}",
-                'description': f"Regex pattern at line {line_num}"
+                'description': f"Regex pattern at line {line_num}",
+                # Only strip trailing whitespace, keep leading indentation
+                'full_line': full_line.rstrip()
             })
 
     return optimizable
+
+
+def reconstruct_code_with_optimization(original_code: str, original_pattern: str, optimized_pattern: str) -> str:
+    """
+    Use LLM to reconstruct complete code with the optimized pattern,
+    preserving variable names, quotes style, and other context.
+
+    Args:
+        original_code: The original line(s) of code
+        original_pattern: The original regex pattern
+        optimized_pattern: The optimized regex pattern
+
+    Returns:
+        Complete reconstructed code with optimized pattern
+    """
+    prompt = f"""You are reconstructing a line of Python code with an optimized regex pattern.
+
+Original code:
+{original_code}
+
+Original regex pattern:
+{original_pattern}
+
+Optimized regex pattern:
+{optimized_pattern}
+
+Replace ONLY the regex pattern in the original code with the optimized pattern, keeping everything else exactly the same (variable names, quote style, r-prefix, indentation/whitespace at the beginning, etc.).
+
+CRITICAL: Preserve the exact indentation/leading whitespace from the original code.
+
+Return ONLY the complete reconstructed code line(s), nothing else. No explanations, no markdown."""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You reconstruct code by replacing patterns while preserving all other context. Return only the code, no explanations."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=500
+        )
+
+        reconstructed = response.choices[0].message.content.rstrip()
+
+        # Remove markdown code blocks if present
+        if reconstructed.startswith("```"):
+            lines = reconstructed.split("\n")
+            reconstructed = "\n".join(
+                [line for line in lines if not line.startswith("```")])
+            reconstructed = reconstructed.lstrip("\n").rstrip()
+
+        # Remove python language identifier if present
+        if reconstructed.startswith("python\n"):
+            reconstructed = reconstructed[7:]
+
+        return reconstructed
+
+    except Exception as e:
+        print(f"      ⚠️  Error reconstructing code: {e}")
+        # Fallback: try simple string replacement
+        return original_code.replace(original_pattern, optimized_pattern)
 
 
 def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
@@ -312,14 +392,14 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
             comment += f"**Suggestion:** {opt['suggestion']}\n\n"
 
         if result.get('improvements'):
-            comment += "**Improvements:**\n"
+            comment += "**Improvements:**\n\n"
             for imp in result['improvements']:
                 comment += f"- {imp}\n"
             comment += "\n"
 
         # Add the code suggestion
         comment += "```suggestion\n"
-        comment += result['optimized'].strip() + "\n"
+        comment += result['optimized'].rstrip() + "\n"
         comment += "```\n"
 
     elif opt_type == 'sql' or result['type'] == 'sql':
@@ -331,14 +411,14 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
             comment += f"**Complexity Score:** {orig_score} → {opt_score} ({improvement:.1f}% improvement)\n\n"
 
         if result.get('improvements'):
-            comment += "**Improvements:**\n"
+            comment += "**Improvements:**\n\n"
             for imp in result['improvements']:
                 comment += f"- {imp}\n"
             comment += "\n"
 
         # Add the code suggestion
         comment += "```suggestion\n"
-        comment += result['optimized'].strip() + "\n"
+        comment += result['optimized'].rstrip() + "\n"
         comment += "```\n"
 
     elif opt_type == 'regex' or result['type'] == 'regex':
@@ -351,21 +431,38 @@ def format_code_suggestion(opt: Dict[str, Any]) -> Dict[str, Any]:
                 comment += f"- {imp}\n"
             comment += "\n"
 
-        # For regex, suggest the optimized pattern
-        comment += "```suggestion\n"
-        comment += result['optimized'].strip() + "\n"
-        comment += "```\n"
+        # For regex, reconstruct the full line with the optimized pattern
+        full_line = opt.get('full_line', '')
+        original_pattern = opt.get('original_pattern', result['original'])
+        optimized_pattern = opt.get('optimized_pattern', result['optimized'])
+
+        if full_line:
+            # Use LLM to reconstruct complete code with optimized pattern
+            print(f"      Reconstructing code with optimized pattern...")
+            reconstructed_code = reconstruct_code_with_optimization(
+                full_line,
+                original_pattern,
+                optimized_pattern
+            )
+            comment += "```suggestion\n"
+            comment += reconstructed_code.rstrip() + "\n"
+            comment += "```\n"
+        else:
+            # Fallback: suggest just the pattern
+            comment += "```suggestion\n"
+            comment += result['optimized'].rstrip() + "\n"
+            comment += "```\n"
 
     elif result['type'] == 'python':
         if result.get('improvements'):
-            comment += "**Improvements:**\n"
+            comment += "**Improvements:**\n\n"
             for imp in result['improvements']:
                 comment += f"- {imp}\n"
             comment += "\n"
 
         # Add the code suggestion
         comment += "```suggestion\n"
-        comment += result['optimized'].strip() + "\n"
+        comment += result['optimized'].rstrip() + "\n"
         comment += "```\n"
 
     comment += "\n*Generated by MergeTune - AI-powered code optimization*"
@@ -792,7 +889,10 @@ Do not summarize or truncate file contents. Include every line of code."""}
                             'location': segment['location'],
                             'description': segment['description'],
                             'result': result,
-                            'type': 'regex'
+                            'type': 'regex',
+                            'full_line': segment.get('full_line', ''),
+                            'original_pattern': result['original'],
+                            'optimized_pattern': result['optimized']
                         })
                         print("      ✅ Optimization found!")
                     else:
